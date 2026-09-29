@@ -48,8 +48,18 @@ After changing the plugin code, only steps 3 and 4 are needed.
 
 ## Testing
 
-Load `test\geomsubset_test.usda` in Mari with "Create Face Selection Groups from GeomSubsets" switched on.
-That's the new button next to "Create Face Selection Group per mesh", and it uses the same icon for now.
+There are two new buttons next to "Create Face Selection Group per mesh":
+
+- **Create Selection Groups for Material Bindings** (material tag icon). Subsets in the `materialBind` family
+  become one group per bound material, so every face using "Wood" ends up in a "Wood" group, whichever mesh
+  it's on. A subset without a material bound directly to it keeps its own name.
+- **Create Selection Groups for Custom Geo Subsets** (same icon as the per mesh button for now). Every other
+  face subset becomes a group named after the subset.
+
+### Simple file
+
+Load `test\geomsubset_test.usda` with "Create Selection Groups for Custom Geo Subsets" switched on.
+None of its subsets are material bindings, so the material option makes no difference here.
 
 | Selection group | Faces                                                                   |
 |-----------------|-------------------------------------------------------------------------|
@@ -63,14 +73,35 @@ That's the new button next to "Create Face Selection Group per mesh", and it use
 "top" is one shared group when both meshes end up in the same Mari object.
 If they are loaded as separate objects, each one gets its own "top" group.
 
+### Complex file
+
+`test\geomsubset_complex_test.usda` has a dense sphere with triangles and quads, a subdivided crate in a moved
+and turned group, a strip spread over UDIMs 1001-1004, and a grid of edge cases. Its material subsets have
+coloured materials, so they show up in any USD viewer. The expected groups and face counts are listed at the top
+of the file. With both buttons on you should get 8 material groups and 14 custom groups:
+
+- Material: Red 36, Blue 36 (both shared by the sphere and the strip), White 448, Metal 72, Wood 24, Green 4,
+  Yellow 4, and unbound_material_subset 4 (a material binding subset without a material)
+- Custom: checker, equator_band, seam_column, side_front / back / right / left / top / bottom, trim 24
+  (shared by the crate and the strip), control, whole_mesh, negative_and_out_of_range 1, animated_indices 2
+- hidden_only only appears with "Include Invisible" on. all_invalid, empty and edges_only never create a group.
+- The log should show two "skipped invalid face indices" lines, for negative_and_out_of_range and all_invalid.
+
+The file is made by `test\make_complex_test.py`. To change and rebuild it, run that script with the Python and USD
+from `build_usd.bat`, the commands are at the top of the script.
+
 ## Things to know
 
 - Mari 8's own `MriUSDImport.dll` also contains a USD camera importer. The code in this repo doesn't have that
   yet, so installing this build loses USD camera import until the repo catches up.
 - `python\usdLoaderTab.py` in this repo is still the Mari 7 version. It only knows PySide2 and doesn't work in
   Mari 8, which uses Qt6. `mari8_python\mariUsd\usdLoaderTab.py` is Mari 8.0v1-Beta.2's own file with the
-  GeomSubset button added, and that's the one the install script copies. If a newer Mari 8 build changes that
-  file, redo the three additions on top of the new version: the icon, the button, and the `setGeoPluginAttribute` call.
+  two GeomSubset buttons added, and that's the one the install script copies. If a newer Mari 8 build changes that
+  file, redo the additions on top of the new version: the icons, the buttons, and the `setGeoPluginAttribute` calls.
+- Material groups only use a material bound directly to the subset. A subset that only gets its material through a
+  collection binding, or only for the `full` or `preview` purpose, keeps its subset name.
+- Material and custom groups share one set of names, so a custom subset named exactly like a material ends up in
+  that material's group.
 - USD 25.08 dropped Boost. The plugin used `boost::shared_ptr` in one place, which is now `std::shared_ptr`.
   The plugin's CMakeLists still insists on the `BOOST_*` environment variables, so `build_plugin.bat` points
   them at an empty folder.
