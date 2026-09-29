@@ -67,7 +67,8 @@ class UsdReader
                 std::string label, 
                 const std::vector<int> &frames,
                 bool createFaceSelectionGroups,
-                bool createSubsetSelectionGroups);
+                bool createMaterialSelectionGroups,
+                bool createCustomSelectionGroups);
         
         static void _GetFrameList(const std::string &frameString, 
                 std::vector<int> &frames);
@@ -94,7 +95,8 @@ class UsdReader
                 bool& keepCentered,
                 bool& includeInvisible,
                 bool& createFaceSelectionGroups,
-                bool& createSubsetSelectionGroups);
+                bool& createMaterialSelectionGroups,
+                bool& createCustomSelectionGroups);
 
         void _SaveMetadata(
                 MriGeoEntityHandle &Entity,

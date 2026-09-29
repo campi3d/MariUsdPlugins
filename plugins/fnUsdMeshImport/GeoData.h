@@ -50,8 +50,15 @@ public:
 
         typedef std::map<std::string, int> UVSet;
 
-        // GeomSubset name and the face indices it covers
-        typedef std::vector<std::pair<std::string, std::vector<int> > > FaceSubsets;
+        // A face GeomSubset to turn into a selection group. Material binding subsets are named
+        // after their material, custom subsets after the subset itself.
+        struct FaceSubset
+        {
+            std::string groupName;
+            std::vector<int> faces;
+            bool isMaterialBinding;
+        };
+        typedef std::vector<FaceSubset> FaceSubsets;
 
         static void GetUvSets(PXR_NS::UsdPrim const &prim, UVSet &retval);
 
