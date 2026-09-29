@@ -32,6 +32,7 @@ USER_ROLE_PATH = qt.UserRole
 
 CONFORM_TO_MARI_Y_AS_UP_ICON = mari.resources.createIcon("USDImporterIcons_ConformToMariYasUp.svg")
 CREATE_FACE_SELECTION_GROUP_PER_MESH_ICON = mari.resources.createIcon("USDImporterIcons_CreateFaceSelectionGroupPerMesh.svg")
+CREATE_SUBSET_SELECTION_GROUPS_ICON = mari.resources.createIcon("Assign_SelectionGroup.svg")
 INCLUDE_INVISIBLE_ICON = mari.resources.createIcon("USDImporterIcons_IncludeInvisible.svg")
 KEEP_CENTERED_ICON = mari.resources.createIcon("USDImporterIcons_KeepCentered.svg")
 
@@ -350,6 +351,11 @@ class UsdLoaderWidget(widgets.QWidget):
         self.create_face_selection_group_checkbox.setToolTip("""Enable to create selection groups per mesh""")
         checkbox_layout.addWidget(self.create_face_selection_group_checkbox)
 
+        self.create_subset_selection_groups_checkbox = widgets.QPushButton(CREATE_SUBSET_SELECTION_GROUPS_ICON, "")
+        self.create_subset_selection_groups_checkbox.setCheckable(True)
+        self.create_subset_selection_groups_checkbox.setToolTip("""Enable to create selection groups from GeomSubsets""")
+        checkbox_layout.addWidget(self.create_subset_selection_groups_checkbox)
+
         options_layout.addLayout(checkbox_layout, 2,0,4,0)
 
     def showEvent(self, event):
@@ -383,6 +389,7 @@ class UsdLoaderWidget(widgets.QWidget):
         mari.app.setGeoPluginAttribute("Conform to Mari Y as up", self.conform_y_up_checkbox.isChecked())
         mari.app.setGeoPluginAttribute("Include Invisible", self.include_invisible_checkbox.isChecked())
         mari.app.setGeoPluginAttribute("Create Face Selection Group per mesh", self.create_face_selection_group_checkbox.isChecked())
+        mari.app.setGeoPluginAttribute("Create Face Selection Groups from GeomSubsets", self.create_subset_selection_groups_checkbox.isChecked())
 
         # Fill model names based on the tree view
         mari.app.setGeoPluginAttribute("Load", "Specified Models in Model Names")
