@@ -194,11 +194,17 @@ MriGeoPluginResult getSettings(MriUserItemHandle SettingsHandle,
     CreateFaceSelectionGroupsValue.m_Int = 0;
     host.setAttribute(SettingsHandle, "Create Face Selection Group per mesh", &CreateFaceSelectionGroupsValue);
 
-    // Include CreateSubsetSelectionGroups
-    MriAttributeValue CreateSubsetSelectionGroupsValue;
-    CreateSubsetSelectionGroupsValue.m_Type = MRI_ATTR_BOOL;
-    CreateSubsetSelectionGroupsValue.m_Int = 0;
-    host.setAttribute(SettingsHandle, "Create Face Selection Groups from GeomSubsets", &CreateSubsetSelectionGroupsValue);
+    // Include CreateMaterialSelectionGroups
+    MriAttributeValue CreateMaterialSelectionGroupsValue;
+    CreateMaterialSelectionGroupsValue.m_Type = MRI_ATTR_BOOL;
+    CreateMaterialSelectionGroupsValue.m_Int = 0;
+    host.setAttribute(SettingsHandle, "Create Selection Groups for Material Bindings", &CreateMaterialSelectionGroupsValue);
+
+    // Include CreateCustomSelectionGroups
+    MriAttributeValue CreateCustomSelectionGroupsValue;
+    CreateCustomSelectionGroupsValue.m_Type = MRI_ATTR_BOOL;
+    CreateCustomSelectionGroupsValue.m_Int = 0;
+    host.setAttribute(SettingsHandle, "Create Selection Groups for Custom Geo Subsets", &CreateCustomSelectionGroupsValue);
 
     return res;
 }

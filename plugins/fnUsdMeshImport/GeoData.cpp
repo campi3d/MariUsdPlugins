@@ -39,6 +39,8 @@
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdGeom/primvarsAPI.h"
 #include "pxr/usd/usdGeom/subset.h"
+#include "pxr/usd/usdShade/materialBindingAPI.h"
+#include "pxr/usd/usdShade/tokens.h"
 
 #include <float.h>
 using namespace std;
@@ -163,8 +165,23 @@ GeoData::GeoData(UsdPrim const &prim,
             }
 
             // An empty list would make Mari add every face of the mesh, so leave those out
-            if (!faceIndices.empty())
-                m_faceSubsets.emplace_back(subset.GetPrim().GetName().GetString(), faceIndices);
+            if (faceIndices.empty())
+                continue;
+
+            TfToken familyName;
+            subset.GetFamilyNameAttr().Get(&familyName);
+            if (familyName == UsdShadeTokens->materialBind)
+            {
+                // Name the group after the bound material, so every face using it ends up in one group.
+                // Subsets without a material of their own keep the subset name.
+                const SdfPath materialPath = UsdShadeMaterialBindingAPI(subset.GetPrim()).GetDirectBinding().GetMaterialPath();
+                const std::string groupName = materialPath.IsEmpty() ? subset.GetPrim().GetName().GetString() : materialPath.GetName();
+                m_faceSubsets.push_back({groupName, faceIndices, true});
+            }
+            else
+            {
+                m_faceSubsets.push_back({subset.GetPrim().GetName().GetString(), faceIndices, false});
+            }
         }
     }
 
