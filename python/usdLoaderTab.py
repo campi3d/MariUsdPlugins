@@ -33,7 +33,7 @@ USER_ROLE_PATH = qt.UserRole
 CONFORM_TO_MARI_Y_AS_UP_ICON = mari.resources.createIcon("USDImporterIcons_ConformToMariYasUp.svg")
 CREATE_FACE_SELECTION_GROUP_PER_MESH_ICON = mari.resources.createIcon("USDImporterIcons_CreateFaceSelectionGroupPerMesh.svg")
 CREATE_MATERIAL_SELECTION_GROUPS_ICON = mari.resources.createIcon("MaterialTag.svg")
-# TODO: Change this icon ! Currently reusing the same icon as above.
+
 CREATE_CUSTOM_SELECTION_GROUPS_ICON = mari.resources.createIcon("USDImporterIcons_CreateFaceSelectionGroupPerMesh.svg")
 INCLUDE_INVISIBLE_ICON = mari.resources.createIcon("USDImporterIcons_IncludeInvisible.svg")
 KEEP_CENTERED_ICON = mari.resources.createIcon("USDImporterIcons_KeepCentered.svg")
