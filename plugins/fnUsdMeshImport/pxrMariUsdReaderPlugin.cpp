@@ -33,7 +33,7 @@
 #include "UsdReader.h"
 
 #include "pxr/base/tf/stringUtils.h"
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include <string>
 #include <time.h>
 #include <sstream>
@@ -52,7 +52,7 @@ MriGeoPluginResult load(MriGeoEntityHandle Entity,
         const char **ppMessagesOut)
 {
     
-    boost::shared_ptr<UsdReader> reader;
+    std::shared_ptr<UsdReader> reader;
 
     // Check the extension
     if((!TfStringEndsWith(pFileName, ".usd")) &&
@@ -65,7 +65,7 @@ MriGeoPluginResult load(MriGeoEntityHandle Entity,
     // else
     
     host.trace("[UsdPlugin] Load %s\n", pFileName);
-    reader = boost::shared_ptr<UsdReader>(new UsdReader(pFileName, 
+    reader = std::shared_ptr<UsdReader>(new UsdReader(pFileName, 
                                                         host));
     MriGeoPluginResult res = reader->Load(Entity);
     sUsdLog = reader->GetLog();
@@ -101,7 +101,7 @@ MriGeoPluginResult getSettings(MriUserItemHandle SettingsHandle,
     
     host.trace("[UsdPlugin] getSettings %s\n", pFileName);
 
-    boost::shared_ptr<UsdReader> reader;
+    std::shared_ptr<UsdReader> reader;
 
     // Check the extension
     if((!TfStringEndsWith(pFileName, ".usd")) &&
@@ -113,7 +113,7 @@ MriGeoPluginResult getSettings(MriUserItemHandle SettingsHandle,
     }
     // else
     
-    reader = boost::shared_ptr<UsdReader>(new UsdReader(pFileName, 
+    reader = std::shared_ptr<UsdReader>(new UsdReader(pFileName, 
                                                         host));
 
     // Load option
