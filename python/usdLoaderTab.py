@@ -32,9 +32,11 @@ USER_ROLE_PATH = qt.UserRole
 
 CONFORM_TO_MARI_Y_AS_UP_ICON = mari.resources.createIcon("USDImporterIcons_ConformToMariYasUp.svg")
 CREATE_FACE_SELECTION_GROUP_PER_MESH_ICON = mari.resources.createIcon("USDImporterIcons_CreateFaceSelectionGroupPerMesh.svg")
-CREATE_MATERIAL_SELECTION_GROUPS_ICON = mari.resources.createIcon("MaterialTag.svg")
 
+# TODO Adjust those two icons
+CREATE_MATERIAL_SELECTION_GROUPS_ICON = mari.resources.createIcon("MaterialTag.svg")
 CREATE_CUSTOM_SELECTION_GROUPS_ICON = mari.resources.createIcon("USDImporterIcons_CreateFaceSelectionGroupPerMesh.svg")
+
 INCLUDE_INVISIBLE_ICON = mari.resources.createIcon("USDImporterIcons_IncludeInvisible.svg")
 KEEP_CENTERED_ICON = mari.resources.createIcon("USDImporterIcons_KeepCentered.svg")
 
@@ -355,12 +357,13 @@ class UsdLoaderWidget(widgets.QWidget):
 
         self.create_material_selection_groups_checkbox = widgets.QPushButton(CREATE_MATERIAL_SELECTION_GROUPS_ICON, "")
         self.create_material_selection_groups_checkbox.setCheckable(True)
-        self.create_material_selection_groups_checkbox.setToolTip("""Enable to create a selection group per bound material from material binding GeomSubsets""")
+        self.create_material_selection_groups_checkbox.setToolTip("""Enable to create a selection group per material from material binding GeomSubsets""")
         checkbox_layout.addWidget(self.create_material_selection_groups_checkbox)
 
         self.create_custom_selection_groups_checkbox = widgets.QPushButton(CREATE_CUSTOM_SELECTION_GROUPS_ICON, "")
         self.create_custom_selection_groups_checkbox.setCheckable(True)
-        self.create_custom_selection_groups_checkbox.setToolTip("""Enable to create selection groups from all other GeomSubsets""")
+        self.create_custom_selection_groups_checkbox.setToolTip("""Enable to create selection groups from custom
+                                                            GeomSubsets""")
         checkbox_layout.addWidget(self.create_custom_selection_groups_checkbox)
 
         options_layout.addLayout(checkbox_layout, 2,0,4,0)
