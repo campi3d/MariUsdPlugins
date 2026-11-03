@@ -20,18 +20,43 @@
 # KIND, either express or implied. See the Apache License for the specific
 # language governing permissions and limitations under the Apache License.
 
-import mari
-import PySide2.QtCore as core
-import PySide2.QtGui as gui
-import PySide2.QtWidgets as widgets
-qt = core.Qt
+"""USD geometry loader UI tab for Mari.
+
+Provides :class:`UsdLoaderTreeWidget` and :class:`UsdLoaderWidget`, the
+Qt widgets that drive the USD model import dialog and feed the user's
+choice of prims, variants and loader options back into the Mari
+C++ geo-loader plugin via ``mari.app.setGeoPluginAttribute``.
+"""
+
+import importlib
 
 from fnpxr import Sdf, Usd, UsdGeom
 
-USER_ROLE_PATH = qt.UserRole
+import mari
+
+for base_module in ["PySide6", "PySide2"]:  # Dual Qt6/Qt5 support.
+    try:
+        core = importlib.import_module(f"{base_module}.QtCore")
+        gui = importlib.import_module(f"{base_module}.QtGui")
+        widgets = importlib.import_module(f"{base_module}.QtWidgets")
+        QT_VERSION = base_module
+        break
+    except (ImportError, ModuleNotFoundError):
+        continue
+else:
+    raise ImportError("Neither PySide6 nor PySide2 is available")
+
+USER_ROLE_PATH = core.Qt.UserRole
+
+# Column indices for tree widget
+COLUMN_PATH = 0
+COLUMN_TYPE = 1
+COLUMN_VARIANT_SETS = 2
 
 CONFORM_TO_MARI_Y_AS_UP_ICON = mari.resources.createIcon("USDImporterIcons_ConformToMariYasUp.svg")
-CREATE_FACE_SELECTION_GROUP_PER_MESH_ICON = mari.resources.createIcon("USDImporterIcons_CreateFaceSelectionGroupPerMesh.svg")
+CREATE_FACE_SELECTION_GROUP_PER_MESH_ICON = (
+    mari.resources.createIcon("USDImporterIcons_CreateFaceSelectionGroupPerMesh.svg")
+)
 
 # TODO Adjust those two icons
 CREATE_MATERIAL_SELECTION_GROUPS_ICON = mari.resources.createIcon("MaterialTag.svg")
@@ -39,15 +64,25 @@ CREATE_CUSTOM_SELECTION_GROUPS_ICON = mari.resources.createIcon("USDImporterIcon
 
 INCLUDE_INVISIBLE_ICON = mari.resources.createIcon("USDImporterIcons_IncludeInvisible.svg")
 KEEP_CENTERED_ICON = mari.resources.createIcon("USDImporterIcons_KeepCentered.svg")
+SELECT_ALL_ICON = mari.resources.createIcon("SelectAll.png")
+SELECT_NONE_ICON = mari.resources.createIcon("SelectNone.png")
+SELECT_BY_EXPRESSION_ICON = mari.resources.createIcon("SelectByExpression.svg")
+EXPAND_ALL_ICON = mari.resources.createIcon("ExpandAll.svg")
+COLLAPSE_ALL_ICON = mari.resources.createIcon("CollapseAll.svg")
+SHOW_SELECTED_ONLY_ICON = mari.resources.createIcon("SelectVisible.png")
+
 
 class UsdLoaderTreeWidget(widgets.QTreeWidget):
+    """Tree widget that displays a USD stage's prim hierarchy with per-prim variant selectors."""
 
     def __init__(self, Parent=None):
+        """Initialise the tree, configure its columns, and clear any cached stage."""
         widgets.QTreeWidget.__init__(self, Parent)
 
-        self.setColumnCount(2)
-        self.headerItem().setText(0,"Mesh")
-        self.headerItem().setText(1,"Variant Sets")
+        self.setColumnCount(3)
+        self.headerItem().setText(COLUMN_PATH, "Path")
+        self.headerItem().setText(COLUMN_TYPE, "Type")
+        self.headerItem().setText(COLUMN_VARIANT_SETS, "Variant Sets")
 
         self.header().setSectionResizeMode(widgets.QHeaderView.Stretch)
         self.header().setStretchLastSection(False)
@@ -55,25 +90,49 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
         self.stage = None
 
     def populate(self, stage):
+        """Repopulate the tree from ``stage``, expanding the first two levels by default."""
         self.clear()
         self._item_map = {}
         self.stage = stage
-        for prim in stage.Traverse():
+        for prim in stage.TraverseAll():
             self._create_tree_node(prim, stage)
 
         self._expand_to_level(self.invisibleRootItem(), 0, 2)
 
     def _expand_to_level(self, item, level, target):
-        if level<=target or target<0:
+        if level <= target or target < 0:
             item.setExpanded(True)
         else:
             item.setExpanded(False)
         for i in range(item.childCount()):
             self._expand_to_level(item.child(i), level+1, target)
 
+    def _is_prim_supported(self, prim: Usd.Prim) -> bool:
+        if not prim.IsValid():
+            return False
+
+        # Mesh is always supported (mandatory)
+        if prim.IsA(UsdGeom.Mesh):
+            return True
+
+        # Cameras are shown only when Mari provides the right attribute
+        if prim.IsA(UsdGeom.Camera):
+            return mari.app.getGeoPluginAttribute("SupportUSDCamera") == "True"
+
+        return False
+
+    def _should_auto_check(self, prim: Usd.Prim) -> bool:
+        if not prim.IsValid():
+            return False
+
+        if prim.IsA(UsdGeom.Mesh):
+            return True
+
+        return False
+
     def _create_tree_node(self, prim, stage):
-        if not prim.IsA(UsdGeom.Mesh):
-            # Support loading only UsdGeom.Mesh type
+        if not self._is_prim_supported(prim):
+            # Support loading only a subset of Usd prim types
             return
         prim_path = str(prim.GetPath())
         tree_item = self.invisibleRootItem()
@@ -81,24 +140,39 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
             item_for_token = None
             for i in range(tree_item.childCount()):
                 child_item = tree_item.child(i)
-                if child_item.text(0)==token:
+                if child_item.text(COLUMN_PATH) == token:
                     item_for_token = child_item
-            if item_for_token==None:
+            if item_for_token is None:
                 item_for_token = widgets.QTreeWidgetItem()
-                path = tree_item.data(0, USER_ROLE_PATH)
+                path = tree_item.data(COLUMN_PATH, USER_ROLE_PATH)
                 path = "/"+token if path is None else path+"/"+token
                 self._item_map[path] = item_for_token
-                item_for_token.setData(0, USER_ROLE_PATH, path)
-                item_for_token.setFlags(item_for_token.flags() | qt.ItemIsUserCheckable | qt.ItemIsAutoTristate)
-                item_for_token.setCheckState(0, qt.Checked)
-                item_for_token.setText(0, token)
+                item_for_token.setData(COLUMN_PATH, USER_ROLE_PATH, path)
+
+                # Determine initial check state based on prim type
+                prim_for_token = stage.GetPrimAtPath(path)
+                should_check = self._should_auto_check(prim_for_token) if prim_for_token.IsValid() else False
+
+                # Set flags - make checkable and enable auto-tristate for proper parent state updates
+                item_for_token.setFlags(
+                    item_for_token.flags() | core.Qt.ItemIsUserCheckable | core.Qt.ItemIsAutoTristate
+                )
+
+                item_for_token.setCheckState(COLUMN_PATH, core.Qt.Checked if should_check else core.Qt.Unchecked)
+
+                item_for_token.setText(COLUMN_PATH, token)
                 tree_item.addChild(item_for_token)
 
-                prim_for_token = stage.GetPrimAtPath(path)
+                # Set the prim type in column 1
+                if prim_for_token.IsValid():
+                    prim_type = prim_for_token.GetTypeName()
+                    item_for_token.setText(COLUMN_TYPE, str(prim_type) if prim_type else "")
+
+                # Handle variant sets in column 2
                 if prim_for_token.HasVariantSets():
                     variant_sets_widget = widgets.QWidget()
                     variant_sets_layout = widgets.QFormLayout()
-                    variant_sets_layout.setContentsMargins(1,1,1,1);
+                    variant_sets_layout.setContentsMargins(1, 1, 1, 1)
                     variant_sets_widget.setLayout(variant_sets_layout)
                     for variant_set_name in prim_for_token.GetVariantSets().GetNames():
                         variant_set = prim_for_token.GetVariantSet(variant_set_name)
@@ -109,11 +183,12 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
                         combobox.setProperty("prim_path", path)
                         combobox.setProperty("variant_set_name", variant_set_name)
                         combobox.currentIndexChanged.connect(self.onVariantComboboxCurrentIndexChanged)
-                    self.setItemWidget(item_for_token, 1, variant_sets_widget)
+                    self.setItemWidget(item_for_token, COLUMN_VARIANT_SETS, variant_sets_widget)
 
             tree_item = item_for_token
 
     def onVariantComboboxCurrentIndexChanged(self, index):
+        """Apply the user's variant selection to the stage and refresh the tree."""
         if self.stage is None:
             return
         combobox = self.sender()
@@ -127,24 +202,25 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
 
     def _get_selected_leaf_paths(self, item):
         result = []
-        if item.childCount()>0:
+        if item.childCount() > 0:
             # Intermediate nodes
-             for i in range(item.childCount()):
-                 result += self._get_selected_leaf_paths(item.child(i))
+            for i in range(item.childCount()):
+                result += self._get_selected_leaf_paths(item.child(i))
         else:
             # Leaf nodes
-            if item.checkState(0)==qt.Checked:
-                result += [item.data(0, USER_ROLE_PATH)]
+            if item.checkState(COLUMN_PATH) == core.Qt.Checked:
+                result += [item.data(COLUMN_PATH, USER_ROLE_PATH)]
         return result
 
     def selected_leaf_paths(self):
+        """Return the prim paths of all fully checked leaf items in the tree."""
         return self._get_selected_leaf_paths(self.invisibleRootItem())
 
     def _get_selected_paths(self, item):
-        if item.checkState(0)==qt.Checked:
+        if item.checkState(COLUMN_PATH) == core.Qt.Checked:
             # Total selection. Stop here returning the path to here.
-            return [item.data(0, USER_ROLE_PATH)]
-        elif item.checkState(0)==qt.Unchecked:
+            return [item.data(COLUMN_PATH, USER_ROLE_PATH)]
+        elif item.checkState(COLUMN_PATH) == core.Qt.Unchecked:
             # No selection. Stop here returning nothing.
             return []
         else:
@@ -155,6 +231,7 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
             return result
 
     def selected_paths(self):
+        """Return the shortest set of prim paths whose subtrees are fully selected."""
         result = []
         root_item = self.invisibleRootItem()
         for i in range(root_item.childCount()):
@@ -162,19 +239,19 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
         return result
 
     def _get_selected_variants(self, item):
-        if item.checkState(0)==qt.Unchecked:
+        if item.checkState(COLUMN_PATH) == core.Qt.Unchecked:
             # No selection. Stop here returning nothing.
             return []
 
         # Get the variant info
         result = []
-        widget = self.itemWidget(item,1)
+        widget = self.itemWidget(item, COLUMN_VARIANT_SETS)
         if widget:
-            path = item.data(0, USER_ROLE_PATH)
+            path = item.data(COLUMN_PATH, USER_ROLE_PATH)
             layout = widget.layout()
             for row in range(layout.rowCount()):
-                label = layout.itemAt(row, layout.LabelRole).widget()
-                combobox = layout.itemAt(row, layout.FieldRole).widget()
+                label = layout.itemAt(row, widgets.QFormLayout.LabelRole).widget()
+                combobox = layout.itemAt(row, widgets.QFormLayout.FieldRole).widget()
                 path_with_variant = path+"{"+label.text()+"="+combobox.currentText()+"}"
                 result.append(path_with_variant)
 
@@ -184,76 +261,22 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
         return result
 
     def selected_variants(self):
+        """Return the list of ``path{variantSet=variant}`` strings selected in the tree."""
         result = []
         root_item = self.invisibleRootItem()
         for i in range(root_item.childCount()):
             result += self._get_selected_variants(root_item.child(i))
         return result
 
-    def contextMenuEvent(self, event):
-        menu = widgets.QMenu()
-        select_all = menu.addAction("Select All")
-        select_none = menu.addAction("Select None")
-        menu.addSeparator()
-        select_by_expression = menu.addAction("Select by Expression")
-        menu.addSeparator()
-        expand_all = menu.addAction("Expand All")
-        collapse_all = menu.addAction("Collapse All")
-        result = menu.exec_(event.globalPos())
-
-        if result==select_all:
-            self.walk(self.invisibleRootItem(), lambda item : item.setCheckState(0, qt.Checked))
-        elif result==select_none:
-            self.walk(self.invisibleRootItem(), lambda item : item.setCheckState(0, qt.Unchecked))
-        elif result==expand_all:
-            self._expand_to_level(self.invisibleRootItem(),0,-1)
-        elif result==collapse_all:
-            self._expand_to_level(self.invisibleRootItem(),0,0)
-        elif result==select_by_expression:
-            dialog = widgets.QInputDialog()
-            dialog.setWindowTitle("Select USD Mesh by Expression")
-            dialog.setLabelText("Type the expression")
-            dialog.setTextValue("")
-            line_edit = dialog.children()[1]
-            line_edit.setToolTip('Enter a list of comma-delimited prim paths to be selected for loading. Use "!" to exclude prims from the list by prefixing the path with an exclamation mark "!"\n e.g. "/root/group, !/root/group/sphere" will select all prims in /root/group except for sphere.')
-            if dialog.exec()==dialog.Accepted:
-                # Check validity and sort checking and unchecking
-                paths = dialog.textValue().split(",")
-                check_paths = []
-                uncheck_paths = []
-                invalid_paths = []
-                for path in paths:
-                    path = path.strip()
-                    if path.startswith("!"):
-                        if self.is_path_valid(path[1:].strip()):
-                            uncheck_paths.append(path[1:].strip())
-                        else:
-                            invalid_paths.append(path)
-                    else:
-                        if self.is_path_valid(path):
-                            check_paths.append(path)
-                        else:
-                            invalid_paths.append(path)
-
-                if len(invalid_paths)>0:
-                    mari.utils.message("Invalid paths were found. There are no prims specified by these paths.", "Invalid Expression", icon=widgets.QMessageBox.Warning, details="\n".join(invalid_paths))
-                else:
-                    # First select none
-                    self.walk(self.invisibleRootItem(), lambda item : item.setCheckState(0, qt.Unchecked))
-
-                    for path in check_paths:
-                        self.visit(self.invisibleRootItem(), list(filter(None, path.split("/"))), None, lambda item : item.setCheckState(0, qt.Checked))
-                    for path in uncheck_paths:
-                        # Apply uncheck after all checking for negation to take priority
-                        self.visit(self.invisibleRootItem(), list(filter(None, path.split("/"))), None, lambda item : item.setCheckState(0, qt.Unchecked))
-
     def walk(self, item, func):
+        """Apply ``func`` to ``item`` and every descendant in a post-order traversal."""
         for i in range(item.childCount()):
             self.walk(item.child(i), func)
         func(item)
 
     def visit(self, item, path_tokens, func, leaf_func):
-        if len(path_tokens)==0:
+        """Walk down ``item`` following ``path_tokens`` and apply ``leaf_func``/``func`` along the way."""
+        if len(path_tokens) == 0:
             if leaf_func:
                 leaf_func(item)
             return
@@ -261,38 +284,67 @@ class UsdLoaderTreeWidget(widgets.QTreeWidget):
         # Visit only the child matching the path token.
         for i in range(item.childCount()):
             child = item.child(i)
-            if child.text(0)==child_path_token:
+            if child.text(COLUMN_PATH) == child_path_token:
                 self.visit(child, path_tokens, func, leaf_func)
         if func:
             func(item)
 
     def is_path_valid(self, path):
+        """Return ``True`` if ``path`` corresponds to a known prim in the loaded tree."""
         return path in self._item_map
 
 
 class UsdLoaderWidget(widgets.QWidget):
-    def __init__(self, parent = None):
-        widgets.QWidget.__init__(self, parent = parent)
+    """Top-level widget hosting the USD prim tree, loader options and selection controls."""
+
+    def __init__(self, parent=None):
+        """Build the loader UI: tree, option controls and selection toolbar."""
+        widgets.QWidget.__init__(self, parent=parent)
 
         layout = widgets.QFormLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
 
-        self._selection_dirty = False
-        self._selection_update_timer = core.QTimer()
-        self._selection_update_timer.setInterval(200)
-        self._selection_update_timer.timeout.connect(self._selection_update)
+        # Add tree control buttons
+        filter_layout = widgets.QHBoxLayout()
+        filter_layout.addStretch(1)
+
+        # Add tree control buttons on the right side
+        self.select_all_button = widgets.QPushButton(SELECT_ALL_ICON, "")
+        self.select_all_button.setToolTip("Select all items in the tree")
+        self.select_all_button.clicked.connect(self._on_select_all)
+        filter_layout.addWidget(self.select_all_button)
+
+        self.select_none_button = widgets.QPushButton(SELECT_NONE_ICON, "")
+        self.select_none_button.setToolTip("Deselect all items in the tree")
+        self.select_none_button.clicked.connect(self._on_select_none)
+        filter_layout.addWidget(self.select_none_button)
+
+        self.select_by_expression_button = widgets.QPushButton(SELECT_BY_EXPRESSION_ICON, "")
+        self.select_by_expression_button.setToolTip("Select items using a path expression")
+        self.select_by_expression_button.clicked.connect(self._on_select_by_expression)
+        filter_layout.addWidget(self.select_by_expression_button)
+
+        self.show_selected_only_button = widgets.QPushButton(SHOW_SELECTED_ONLY_ICON, "")
+        self.show_selected_only_button.setToolTip("Show selected items in a separate view")
+        self.show_selected_only_button.clicked.connect(self._on_show_selected_only)
+        filter_layout.addWidget(self.show_selected_only_button)
+
+        self.expand_all_button = widgets.QPushButton(EXPAND_ALL_ICON, "")
+        self.expand_all_button.setToolTip("Expand all tree nodes")
+        self.expand_all_button.clicked.connect(self._on_expand_all)
+        filter_layout.addWidget(self.expand_all_button)
+
+        self.collapse_all_button = widgets.QPushButton(COLLAPSE_ALL_ICON, "")
+        self.collapse_all_button.setToolTip("Collapse all tree nodes")
+        self.collapse_all_button.clicked.connect(self._on_collapse_all)
+        filter_layout.addWidget(self.collapse_all_button)
+
+        layout.addRow(filter_layout)
 
         self.tree_widget = UsdLoaderTreeWidget()
         self.tree_widget.setMinimumHeight(200)
         layout.addRow(self.tree_widget)
-
-        self.tree_widget.itemChanged.connect(self._request_selection_update)
-
-        self.selected_items_edit = widgets.QLineEdit()
-        self.selected_items_edit.setReadOnly(True)
-        self.selected_items_edit.setToolTip('''Displays the list of meshes selected in the tree''')
-        layout.addRow("Selected Items", self.selected_items_edit)
 
         options = widgets.QGroupBox("Options")
         layout.addRow(options)
@@ -326,7 +378,7 @@ class UsdLoaderWidget(widgets.QWidget):
         self.mapping_scheme_box.setToolTip("""Specify the mode for UV layout
   - UV if available, Ptex otherwise : Load the UV layout if available. If there is no UV layout, Ptex texture is created
   - Force Ptex : Force to create Ptex texture no matter if there is UV layout
-  - UV if available, empty otherwise : Load the UV layout if available. If there is no UV layout, an empty UV layout is created
+  - UV if available, empty otherwise : Load the UV layout if available. If there is no UV layout, an empty UV layout
   - Force empty : Force to create empty UV layout no matter if there is UV layout""")
         options_layout.addWidget(widgets.QLabel("Mapping Scheme"), 1, 2)
         options_layout.addWidget(self.mapping_scheme_box, 1, 3)
@@ -357,18 +409,22 @@ class UsdLoaderWidget(widgets.QWidget):
 
         self.create_material_selection_groups_checkbox = widgets.QPushButton(CREATE_MATERIAL_SELECTION_GROUPS_ICON, "")
         self.create_material_selection_groups_checkbox.setCheckable(True)
-        self.create_material_selection_groups_checkbox.setToolTip("""Enable to create a selection group per material from material binding GeomSubsets""")
+        self.create_material_selection_groups_checkbox.setToolTip(
+            """Enable to create a selection group per material from material binding GeomSubsets"""
+        )
         checkbox_layout.addWidget(self.create_material_selection_groups_checkbox)
 
         self.create_custom_selection_groups_checkbox = widgets.QPushButton(CREATE_CUSTOM_SELECTION_GROUPS_ICON, "")
         self.create_custom_selection_groups_checkbox.setCheckable(True)
-        self.create_custom_selection_groups_checkbox.setToolTip("""Enable to create selection groups from custom
-                                                            GeomSubsets""")
+        self.create_custom_selection_groups_checkbox.setToolTip(
+            """Enable to create selection groups from custom GeomSubsets"""
+        )
         checkbox_layout.addWidget(self.create_custom_selection_groups_checkbox)
 
-        options_layout.addLayout(checkbox_layout, 2,0,4,0)
+        options_layout.addLayout(checkbox_layout, 2, 0, 4, 0)
 
     def showEvent(self, event):
+        """Populate option combos from Mari and load the current USD stage into the tree."""
         attr = mari.app.getGeoPluginAttribute("Merge Type")
         self.merge_type_box.clear()
         self.merge_type_box.addItems(attr.splitlines())
@@ -384,13 +440,23 @@ class UsdLoaderWidget(widgets.QWidget):
 
         # Update the tree widget
         mesh_path = mari.app.currentMeshPathInGeoLoader()
-        root_layer = Sdf.Layer.FindOrOpen(mesh_path)
+
+        # Force reload from disk by clearing any cached layer first
+        existing_layer = Sdf.Layer.Find(mesh_path)
+        if existing_layer:
+            # If layer is already loaded, reload it to pick up any file changes
+            existing_layer.Reload()
+            root_layer = existing_layer
+        else:
+            # Layer not in cache, open it fresh
+            root_layer = Sdf.Layer.FindOrOpen(mesh_path)
+
+        # Open the stage with the (potentially reloaded) layer
         stage = Usd.Stage.Open(root_layer)
         self.tree_widget.populate(stage)
 
-        self._request_selection_update()
-
     def hideEvent(self, event):
+        """Push the user's option values and tree selection back to the Mari geo loader."""
         mari.app.setGeoPluginAttribute("Merge Type", self.merge_type_box.currentText())
         mari.app.setGeoPluginAttribute("UV Set", self.uv_set_box.currentText())
         mari.app.setGeoPluginAttribute("Mapping Scheme", self.mapping_scheme_box.currentText())
@@ -398,26 +464,163 @@ class UsdLoaderWidget(widgets.QWidget):
         mari.app.setGeoPluginAttribute("Keep Centered", self.keep_centered_checkbox.isChecked())
         mari.app.setGeoPluginAttribute("Conform to Mari Y as up", self.conform_y_up_checkbox.isChecked())
         mari.app.setGeoPluginAttribute("Include Invisible", self.include_invisible_checkbox.isChecked())
-        mari.app.setGeoPluginAttribute("Create Face Selection Group per mesh", self.create_face_selection_group_checkbox.isChecked())
-        mari.app.setGeoPluginAttribute("Create Selection Groups for Material Bindings", self.create_material_selection_groups_checkbox.isChecked())
-        mari.app.setGeoPluginAttribute("Create Selection Groups for Custom Geo Subsets", self.create_custom_selection_groups_checkbox.isChecked())
+        mari.app.setGeoPluginAttribute(
+            "Create Face Selection Group per mesh",
+            self.create_face_selection_group_checkbox.isChecked()
+        )
+        mari.app.setGeoPluginAttribute(
+            "Create Selection Groups for Material Bindings",
+            self.create_material_selection_groups_checkbox.isChecked()
+        )
+        mari.app.setGeoPluginAttribute(
+            "Create Selection Groups for Custom Geo Subsets",
+            self.create_custom_selection_groups_checkbox.isChecked()
+        )
 
         # Fill model names based on the tree view
         mari.app.setGeoPluginAttribute("Load", "Specified Models in Model Names")
         mari.app.setGeoPluginAttribute("Model Names", ",".join(self.tree_widget.selected_leaf_paths()))
         mari.app.setGeoPluginAttribute("Variants", " ".join(self.tree_widget.selected_variants()))
 
-    def _request_selection_update(self):
-        self._selection_dirty = True
-        self._selection_update_timer.start()
+    def _on_select_all(self):
+        """Select all items in the tree."""
+        self.tree_widget.walk(
+            self.tree_widget.invisibleRootItem(),
+            lambda item: item.setCheckState(COLUMN_PATH, core.Qt.Checked)
+        )
 
-    def _selection_update(self):
-        self._selection_dirty = False
-        self._selection_update_timer.stop()
+    def _on_select_none(self):
+        """Deselect all items in the tree."""
+        self.tree_widget.walk(
+            self.tree_widget.invisibleRootItem(),
+            lambda item: item.setCheckState(COLUMN_PATH, core.Qt.Unchecked)
+        )
 
-        self.selected_items_edit.setText(",".join(self.tree_widget.selected_paths()))
+    def _on_select_by_expression(self):
+        """Select items using a path expression."""
+        dialog = widgets.QInputDialog()
+        dialog.setWindowTitle("Select USD Mesh by Expression")
+        dialog.setLabelText("Type the expression")
+        dialog.setTextValue("")
+        line_edit = dialog.children()[1]
+        line_edit.setToolTip(
+            "Enter a list of comma-delimited prim paths to be selected for loading. "
+            "Use '!' to exclude prims from the list by prefixing the path with an exclamation mark '!'\n"
+            " e.g. '/root/group, !/root/group/sphere' will select all prims in /root/group except for sphere."
+        )
+        if dialog.exec() == (
+            widgets.QDialog.DialogCode.Accepted if QT_VERSION == "PySide6" else widgets.QDialog.Accepted
+        ):
+            # Check validity and sort checking and unchecking
+            paths = dialog.textValue().split(",")
+            check_paths = []
+            uncheck_paths = []
+            invalid_paths = []
+            for path in paths:
+                path = path.strip()
+                if path.startswith("!"):
+                    if self.tree_widget.is_path_valid(path[1:].strip()):
+                        uncheck_paths.append(path[1:].strip())
+                    else:
+                        invalid_paths.append(path)
+                else:
+                    if self.tree_widget.is_path_valid(path):
+                        check_paths.append(path)
+                    else:
+                        invalid_paths.append(path)
+
+            if len(invalid_paths) > 0:
+                mari.utils.message(
+                    "Invalid paths were found. There are no prims specified by these paths.",
+                    "Invalid Expression",
+                    icon=widgets.QMessageBox.Warning,
+                    details="\n".join(invalid_paths)
+                )
+            else:
+                # First select none
+                self.tree_widget.walk(
+                    self.tree_widget.invisibleRootItem(),
+                    lambda item: item.setCheckState(COLUMN_PATH, core.Qt.Unchecked)
+                )
+
+                for path in check_paths:
+                    self.tree_widget.visit(
+                        self.tree_widget.invisibleRootItem(),
+                        list(filter(None, path.split("/"))),
+                        None,
+                        lambda item: item.setCheckState(COLUMN_PATH, core.Qt.Checked)
+                    )
+                for path in uncheck_paths:
+                    # Apply uncheck after all checking for negation to take priority
+                    self.tree_widget.visit(
+                        self.tree_widget.invisibleRootItem(),
+                        list(filter(None, path.split("/"))),
+                        None,
+                        lambda item: item.setCheckState(COLUMN_PATH, core.Qt.Unchecked)
+                    )
+
+    def _on_expand_all(self):
+        """Expand all tree nodes."""
+        self.tree_widget.expandAll()
+
+    def _on_collapse_all(self):
+        """Collapse all tree nodes."""
+        self.tree_widget.collapseAll()
+
+    def _on_show_selected_only(self):
+        """Show selected items in a separate dialog."""
+        dialog = widgets.QDialog(self)
+        dialog.setWindowTitle("Selected Items")
+        dialog.setMinimumSize(600, 400)
+
+        layout = widgets.QVBoxLayout()
+        dialog.setLayout(layout)
+
+        # Create a read-only tree widget
+        tree = widgets.QTreeWidget()
+        tree.setColumnCount(2)
+        tree.setHeaderLabels(["Path", "Type"])
+        tree.header().setSectionResizeMode(widgets.QHeaderView.Stretch)
+        layout.addWidget(tree)
+
+        # Populate with selected items only
+        self._populate_selected_tree(tree.invisibleRootItem(), self.tree_widget.invisibleRootItem())
+        tree.expandAll()
+
+        # Add close button
+        button_layout = widgets.QHBoxLayout()
+        button_layout.addStretch()
+        close_button = widgets.QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_button)
+        layout.addLayout(button_layout)
+
+        dialog.exec()
+
+    def _populate_selected_tree(self, dest_parent, src_parent):
+        """Recursively copy only checked items to the destination tree."""
+        for i in range(src_parent.childCount()):
+            src_item = src_parent.child(i)
+            check_state = src_item.checkState(COLUMN_PATH)
+
+            # Include item if it's checked or partially checked (has checked descendants)
+            if check_state == core.Qt.Checked or check_state == core.Qt.PartiallyChecked:
+                dest_item = widgets.QTreeWidgetItem()
+                dest_item.setText(0, src_item.text(COLUMN_PATH))
+                dest_item.setText(1, src_item.text(COLUMN_TYPE))
+
+                # Show check state indicator
+                if check_state == core.Qt.Checked:
+                    dest_item.setText(0, "✓ " + src_item.text(COLUMN_PATH))
+                elif check_state == core.Qt.PartiallyChecked:
+                    dest_item.setText(0, "▬ " + src_item.text(COLUMN_PATH))
+
+                dest_parent.addChild(dest_item)
+
+                # Recursively add children
+                self._populate_selected_tree(dest_item, src_item)
+
 
 usd_loader_widget = UsdLoaderWidget()
 if mari.app.isRunning():
     mari.app.registerGeoPluginWidget(["usda", "usdc", "usdz", "usd"], usd_loader_widget)
-

@@ -20,19 +20,41 @@
 # KIND, either express or implied. See the Apache License for the specific
 # language governing permissions and limitations under the Apache License.
 
-import mari
-import PySide2.QtCore as core
-import PySide2.QtGui as gui
-import PySide2.QtWidgets as widgets
-from PySide2.QtCore import Qt as qt
-from . import usdExportManagerTab, usdShadeExport
-import os, json, uuid
+"""Multi-shader USD export dialog and supporting Qt models for Mari.
+
+Implements the *Export Multiple Shaders* dialog: face-selection group
+membership, per-material shader assignment, and the export pipeline
+that drives :mod:`usdShadeExport` from those selections.
+"""
+
+import importlib
+import json
+import os
+import uuid
 import xml.etree.ElementTree as etree
+
+import mari
+
+from . import usdExportManagerTab, usdShadeExport
+
+for base_module in ["PySide6", "PySide2"]:  # Dual Qt6/Qt5 support.
+    try:
+        core = importlib.import_module(f"{base_module}.QtCore")
+        gui = importlib.import_module(f"{base_module}.QtGui")
+        widgets = importlib.import_module(f"{base_module}.QtWidgets")
+        QT_VERSION = base_module
+        break
+    except (ImportError, ModuleNotFoundError):
+        continue
+else:
+    raise ImportError("Neither PySide6 nor PySide2 is available")
+
+QAction = gui.QAction if hasattr(gui, "QAction") else widgets.QAction
 
 # When unifying usdExportManagerTab to this usdMultiShaderExportDialog, these implementation should be moved over
 FileBrowseWidget = usdExportManagerTab.FileBrowseWidget
 load_paths = usdExportManagerTab.USDExportWidget.load_paths
-load_text_value = usdExportManagerTab.USDExportWidget.load_text_value 
+load_text_value = usdExportManagerTab.USDExportWidget.load_text_value
 save_paths = usdExportManagerTab.USDExportWidget.save_paths
 save_text_value = usdExportManagerTab.USDExportWidget.save_text_value
 
@@ -42,12 +64,13 @@ SELECTION_GROUP_COLUMN = 0
 MATERIAL_COLUMN = 1
 SHADER_COLUMN = 2
 
-SHADER_ERROR_PIXMAP = gui.QPixmap(mari.resources.path(mari.resources.ICONS) + '/ShaderError.svg')
+SHADER_ERROR_PIXMAP = gui.QPixmap(mari.resources.path(mari.resources.ICONS) + "/ShaderError.svg")
 
 FACE_SELECTION_GROUP_MIMETYPE = "faceselectiongroup_uuid"
 
+
 def resolveSourceIndex(index):
-    """Returns the index of the source model if the index belongs to a proxy model.
+    """Return the index of the source model if the index belongs to a proxy model.
 
     Args:
         index (QModelIndex): Index to resolve
@@ -59,11 +82,16 @@ def resolveSourceIndex(index):
         return index.model().mapToSource(index)
     return index
 
+
 def getExportItems(material, shader):
-    """Gets ExportItems for the shader. If necessary, this creates ExportItems. Furthermore, this updates the allowlist of ExportItems to display in the view.
+    """Return ``(export_item, input_name)`` pairs for ``shader`` on ``material``, creating any missing items.
 
     Args:
+        material (Material_Item): The owning material whose UUID tags the export items.
         shader (mari.Shader): Shader to get ExportItems for.
+
+    Returns:
+        list[tuple[mari.ExportItem, str]]: Pairs of export items and their shader input names.
     """
     if not shader:
         return []
@@ -79,42 +107,53 @@ def getExportItems(material, shader):
 
     for _, shader_input, shader_model_input_name in input_list:
         for export_item in mari.exports.exportItemList(geo_entity):
-            if export_item and export_item.sourceNode() == shader_input and export_item.hasMetadata("_HIDDEN") and export_item.metadata("_HIDDEN"):
-                if export_item.hasMetadata("_SHADER") and export_item.metadata("_SHADER") == shader_node.uuid() and export_item.hasMetadata("_MATERIAL") and export_item.metadata("_MATERIAL") == material.uuid:
+            if (export_item and export_item.sourceNode() == shader_input and
+                    export_item.hasMetadata("_HIDDEN") and export_item.metadata("_HIDDEN")):
+                if (export_item.hasMetadata("_SHADER") and
+                        export_item.metadata("_SHADER") == shader_node.uuid() and
+                        export_item.hasMetadata("_MATERIAL") and
+                        export_item.metadata("_MATERIAL") == material.uuid):
                     exportItems.append((export_item, shader_model_input_name))
                     break
         else:
             export_item = mari.ExportItem()
             export_item.setSourceNode(shader_input)
-            template = shader_node.name().replace(" ","_")+ "." + shader_model_input_name.replace(" ","_")+ ".$UDIM.png"
-            if template.endswith(".png") and shader_input.depth() != mari.Image.DEPTH_BYTE:
-                template = template[:-4]+".exr"
+            template = (shader_node.name().replace(" ", "_") + "." +
+                        shader_model_input_name.replace(" ", "_") + ".$UDIM.png")
+            if template.endswith(".png") and shader_input.depth() != mari.Image.Depth.DEPTH_BYTE:
+                template = template[:-4] + ".exr"
             export_item.setFileTemplate(template)
             export_item.setMetadata("_SHADER", shader_node.uuid())
             export_item.setMetadata("_MATERIAL", material.uuid)
             export_item.setMetadata("_STREAM", shader_model_input_name)
             export_item.setMetadata("_HIDDEN", True)
             mari.exports.addExportItem(export_item, geo_entity)
-            
+
             # Execute the SetupExportItem callback function for the vendor.
-            setup_export_item_callback = usdShadeExport.functionCallbackForShader(shader_model.id(), usdShadeExport.CALLBACK_NAME_SETUP_EXPORT_ITEM)
+            setup_export_item_callback = usdShadeExport.functionCallbackForShader(
+                shader_model.id(), usdShadeExport.CALLBACK_NAME_SETUP_EXPORT_ITEM)
             if setup_export_item_callback is not None:
                 setup_export_item_callback(export_item)
-            
+
             exportItems.append((export_item, shader_model_input_name))
 
     return exportItems
 
+
 class Material_Item():
+    """Plain-data record describing a single user-authored material row in the dialog."""
+
     def __init__(self, name):
+        """Initialise the material with ``name`` and a freshly generated UUID."""
         self.__name = name
         self.__uuid = str(uuid.uuid1())
-        self.__checked = qt.Checked
+        self.__checked = core.Qt.Checked
         self.__shader_assignments = {}
         self.__selection_groups = []
 
     @property
     def name(self):
+        """Display name of the material."""
         return self.__name
 
     @name.setter
@@ -123,14 +162,16 @@ class Material_Item():
 
     @property
     def uuid(self):
+        """Unique identifier persisted with project metadata."""
         return self.__uuid
 
-    @name.setter
-    def uuid(self, uuid):
-        self.__uuid = uuid
+    @uuid.setter
+    def uuid(self, new_uuid):
+        self.__uuid = new_uuid
 
     @property
     def checked(self):
+        """Qt check-state controlling whether this material is included in export."""
         return self.__checked
 
     @checked.setter
@@ -139,6 +180,7 @@ class Material_Item():
 
     @property
     def shader_assignments(self):
+        """Mapping of shader-model id to the assigned ``mari.Shader``."""
         return self.__shader_assignments
 
     @shader_assignments.setter
@@ -147,6 +189,7 @@ class Material_Item():
 
     @property
     def selection_groups(self):
+        """List of face-selection-group UUIDs bound to this material."""
         return self.__selection_groups
 
     @selection_groups.setter
@@ -154,6 +197,7 @@ class Material_Item():
         self.__selection_groups = selection_groups
 
     def to_dict(self):
+        """Serialise this material to a JSON-friendly dict for project metadata storage."""
         shader_assignments = {}
         for key in self.shader_assignments:
             shader = self.shader_assignments[key]
@@ -162,7 +206,7 @@ class Material_Item():
         usd_material_data = {
             "name": self.name,
             "uuid": self.uuid,
-            "checked": True if self.checked == qt.Checked else False,
+            "checked": True if self.checked == core.Qt.Checked else False,
             "shader_assignments": shader_assignments,
             "selection_groups": self.selection_groups,
         }
@@ -170,13 +214,14 @@ class Material_Item():
 
     @classmethod
     def from_dict(cls, usd_material_data):
+        """Rebuild a :class:`Material_Item` from the dict produced by :meth:`to_dict`."""
         try:
             name = usd_material_data["name"]
             material = cls(name)
 
             material.name = name
             material.uuid = usd_material_data["uuid"]
-            material.checked = qt.Checked if usd_material_data["checked"] else qt.Unchecked
+            material.checked = core.Qt.Checked if usd_material_data["checked"] else core.Qt.Unchecked
             material.selection_groups = usd_material_data["selection_groups"]
             material.shader_assignments = {}
 
@@ -189,32 +234,38 @@ class Material_Item():
                 uuid = shader_assignments[key]
                 if uuid in shader_map:
                     material.shader_assignments[key] = shader_map[uuid]
-        except Exception as e:
+        except Exception:
             print("Failed to load saved material data")
 
         return material
-            
+
 
 class Material_View(widgets.QTableView):
+    """Table view for the materials grid; exposes context-menu and selection signals."""
+
     currentIndexChanged = core.Signal(core.QModelIndex)
     editShaderInputsTriggered = core.Signal()
     addNewMaterialTriggered = core.Signal()
     deleteMaterialTriggered = core.Signal()
 
-    def __init__(self, parent = None):
-        widgets.QTableView.__init__(self, parent = parent)
+    def __init__(self, parent=None):
+        """Initialise the view with the given Qt ``parent``."""
+        widgets.QTableView.__init__(self, parent=parent)
 
     def initialize(self):
+        """Apply post-model configuration (must be called after :meth:`setModel`)."""
         self.horizontalHeader().setSectionResizeMode(SELECTION_GROUP_COLUMN, widgets.QHeaderView.Fixed)
         self.resizeColumnsToContents()
 
     def currentChanged(self, current, previous):
+        """Forward Qt's current-index notification through :attr:`currentIndexChanged`."""
         self.horizontalHeader().setSectionResizeMode(SELECTION_GROUP_COLUMN, widgets.QHeaderView.Fixed)
         result = super(Material_View, self).currentChanged(current, previous)
         self.currentIndexChanged.emit(current)
         return result
 
     def contextMenuEvent(self, event):
+        """Show the right-click menu with edit/add/delete actions for the row under ``event``."""
         menu = widgets.QMenu()
         edit_shader_inputs = menu.addAction("Edit Shader Inputs")
         edit_shader_inputs.triggered.connect(self.editShaderInputsTriggered)
@@ -225,11 +276,16 @@ class Material_View(widgets.QTableView):
         menu.exec_(self.mapToGlobal(event.pos()))
         return super(Material_View, self).contextMenuEvent(event)
 
+
 class ShaderAssignment_Item_Delegate(widgets.QStyledItemDelegate):
-    def __init__(self, parent = None):
-        widgets.QStyledItemDelegate.__init__(self, parent = parent)
+    """Delegate providing shader-picker comboboxes and a line edit for the material grid."""
+
+    def __init__(self, parent=None):
+        """Initialise the delegate with the given Qt ``parent``."""
+        widgets.QStyledItemDelegate.__init__(self, parent=parent)
 
     def createEditor(self, parent, option, index):
+        """Return a combobox of compatible shaders for shader columns, or a line edit for the name column."""
         if index.column() >= SHADER_COLUMN:
             model = index.model()
             editor = widgets.QComboBox(parent)
@@ -245,6 +301,7 @@ class ShaderAssignment_Item_Delegate(widgets.QStyledItemDelegate):
         return widgets.QStyledItemDelegate.createEditor(self, parent, option, index)
 
     def setEditorData(self, editor, index):
+        """Initialise the editor with the row's current shader assignment or material name."""
         if index.column() >= SHADER_COLUMN and isinstance(editor, widgets.QComboBox):
             model = index.model()
             shader_model_name = model.shader_model_list[index.column()-SHADER_COLUMN]
@@ -261,6 +318,7 @@ class ShaderAssignment_Item_Delegate(widgets.QStyledItemDelegate):
         widgets.QStyledItemDelegate.setEditorData(self, editor, index)
 
     def setModelData(self, editor, model, index):
+        """Write the chosen shader (or new material name) back to the model."""
         if index.column() >= SHADER_COLUMN and isinstance(editor, widgets.QComboBox):
             shader_model_name = model.shader_model_list[index.column()-SHADER_COLUMN]
             model.material_list[index.row()].shader_assignments[shader_model_name] = editor.currentData()
@@ -272,21 +330,25 @@ class ShaderAssignment_Item_Delegate(widgets.QStyledItemDelegate):
         widgets.QStyledItemDelegate.setModelData(self, editor, model, index)
 
     def updateEditorGeometry(self, editor, option, index):
+        """Resize the editor to cover the cell rectangle."""
         editor.setGeometry(option.rect)
 
     def finishEdit(self):
+        """Commit and close the combobox editor when the user picks a value."""
         editor = self.sender()
         if isinstance(editor, widgets.QComboBox):
             self.commitData.emit(editor)
-            self.closeEditor.emit(editor, self.NoHint)
+            self.closeEditor.emit(editor, widgets.QAbstractItemDelegate.NoHint)
             return
         widgets.QStyledItemDelegate.finishEdit(self)
 
 
-
 class Material_Model(core.QAbstractItemModel):
-    def __init__(self, parent = None):
-        core.QAbstractItemModel.__init__(self, parent = parent)
+    """Model backing the materials grid: rows are :class:`Material_Item`, columns are shader models."""
+
+    def __init__(self, parent=None):
+        """Initialise the model and gather the project's shader models and shader lists."""
+        core.QAbstractItemModel.__init__(self, parent=parent)
 
         self.__shader_model_list = []
         self.__shader_map = {}
@@ -296,42 +358,49 @@ class Material_Model(core.QAbstractItemModel):
         self.__material_list = []
 
         self.__selection_group_icon = mari.resources.createIcon("SelectionSet.png")
-        self.__selection_group_history_icon = gui.QIcon(mari.resources.path(mari.resources.ICONS) + '/SelectionGroupsHistory.svg')
+        self.__selection_group_history_icon = gui.QIcon(
+            mari.resources.path(mari.resources.ICONS) + "/SelectionGroupsHistory.svg")
         self.__shader_error_icon = gui.QIcon(SHADER_ERROR_PIXMAP)
 
     @property
     def name(self):
+        """Reserved name accessor (unused; kept for backwards compatibility)."""
         return self.__name
 
     @property
     def shader_model_list(self):
+        """Sorted list of distinct shader-model ids currently in use."""
         return self.__shader_model_list
 
     @property
     def shader_map(self):
+        """Mapping of shader-model id to the list of ``(name, mari.Shader)`` pairs."""
         return self.__shader_map
 
     @property
     def material_list(self):
+        """List of :class:`Material_Item` rows."""
         return self.__material_list
 
     def headerData(self, section, orientation, role):
-        if orientation == qt.Horizontal:
-            if role == qt.DisplayRole:
+        """Provide column headers, decoration icons and centred alignment."""
+        if orientation == core.Qt.Horizontal:
+            if role == core.Qt.DisplayRole:
                 if section == SELECTION_GROUP_COLUMN:
-                    return None 
+                    return None
                 elif section == MATERIAL_COLUMN:
                     return "Material"
                 elif section < len(self.shader_model_list)+SHADER_COLUMN:
                     return self.shader_model_list[section-2]
-            elif role == qt.DecorationRole:
+            elif role == core.Qt.DecorationRole:
                 if section == SELECTION_GROUP_COLUMN:
                     return self.__selection_group_icon
-            elif role == qt.TextAlignmentRole:
-                return qt.AlignHCenter
+            elif role == core.Qt.TextAlignmentRole:
+                return core.Qt.AlignHCenter
         return None
 
     def saveMaterials(self):
+        """Persist the current materials list as JSON in the project metadata."""
         if not mari.projects.current():
             return
 
@@ -342,6 +411,7 @@ class Material_Model(core.QAbstractItemModel):
         mari.projects.current().setMetadata("_USDMultiShaderExport_Materials", json_data)
 
     def loadMaterials(self):
+        """Restore the materials list from project metadata (no-op if none stored)."""
         if not mari.projects.current():
             return
 
@@ -355,19 +425,20 @@ class Material_Model(core.QAbstractItemModel):
             material_list = json.loads(json_data)
 
             for material_dict in material_list:
-                material = Material_Item.from_dict(material_dict) 
+                material = Material_Item.from_dict(material_dict)
                 self.__material_list.append(material)
 
             # Trigger redraw
             self.layoutChanged.emit()
 
     def addMaterial(self):
+        """Append a new uniquely named material and persist the change."""
         existing_material_names = set([material.name for material in self.material_list])
-        i=1
+        i = 1
         material_name = ""
         while True:
-            material_name = "Material"+str(i)
-            if not material_name in existing_material_names:
+            material_name = "Material" + str(i)
+            if material_name not in existing_material_names:
                 break
             i += 1
 
@@ -382,6 +453,7 @@ class Material_Model(core.QAbstractItemModel):
         self.saveMaterials()
 
     def removeMaterials(self, rows_to_remove):
+        """Delete the materials at the given ``rows_to_remove`` and persist the change."""
         # Remove from reverse sorted list to remove correct items
         rows_to_remove.sort()
         rows_to_remove.reverse()
@@ -407,17 +479,19 @@ class Material_Model(core.QAbstractItemModel):
             if not shader_model:
                 continue
             shader_model_name = shader_model.id()
-            if not shader_model_name in self.__shader_map:
+            if shader_model_name not in self.__shader_map:
                 self.shader_map[shader_model_name] = [("", None)]
             self.__shader_map[shader_model_name].append((shader.name(), shader))
-            self.__shader_inputs_empty[shader] = len(usdExportManagerTab.ExportItem_Model.advancedInputList(shader))==0
+            self.__shader_inputs_empty[shader] = (
+                len(usdExportManagerTab.ExportItem_Model.advancedInputList(shader)) == 0)
         for shader_names in self.__shader_map.values():
-            shader_names.sort(key=lambda x:x[0])
+            shader_names.sort(key=lambda x: x[0])
         self.__shader_model_list = list(self.__shader_map.keys())
         self.__shader_model_list.sort()
 
     def data(self, index, role):
-        if role == qt.DisplayRole:
+        """Return display/decoration/check/tooltip data for the given cell ``index``."""
+        if role == core.Qt.DisplayRole:
             row = index.row()
             col = index.column()
             material = self.material_list[row]
@@ -428,93 +502,111 @@ class Material_Model(core.QAbstractItemModel):
             else:
                 shader_model_name = self.shader_model_list[index.column()-SHADER_COLUMN]
                 shader_assignments = self.material_list[row].shader_assignments
-                if shader_model_name in shader_assignments and shader_assignments[shader_model_name] != None:
+                if (shader_model_name in shader_assignments and
+                        shader_assignments[shader_model_name] is not None):
                     return shader_assignments[shader_model_name].name()
                 else:
                     return ""
-        elif role == qt.DecorationRole:
+        elif role == core.Qt.DecorationRole:
             row = index.row()
             col = index.column()
             if col == SELECTION_GROUP_COLUMN:
-                return self.__selection_group_history_icon if self.material_list[row].selection_groups else None 
+                return self.__selection_group_history_icon if self.material_list[row].selection_groups else None
             if col >= SHADER_COLUMN:
                 shader_model_name = self.shader_model_list[col-SHADER_COLUMN]
                 shader_assignments = self.material_list[row].shader_assignments
-                if shader_model_name in shader_assignments and shader_assignments[shader_model_name] != None:
+                if (shader_model_name in shader_assignments and
+                        shader_assignments[shader_model_name] is not None):
                     shader = shader_assignments[shader_model_name]
                     if self.__shader_inputs_empty[shader]:
                         return self.__shader_error_icon
-        elif role == qt.CheckStateRole and index.column()==MATERIAL_COLUMN:
+        elif role == core.Qt.CheckStateRole and index.column() == MATERIAL_COLUMN:
             material = self.material_list[index.row()]
             return material.checked
-        elif role == qt.ForegroundRole:
-            if self.material_list[index.row()].checked == qt.Unchecked:
+        elif role == core.Qt.ForegroundRole:
+            if self.material_list[index.row()].checked == core.Qt.Unchecked:
                 palette = gui.QPalette()
                 return palette.brush(palette.Disabled, palette.Foreground)
-        elif role == qt.ToolTipRole:
+        elif role == core.Qt.ToolTipRole:
             shader_model_name = self.shader_model_list[index.column()-SHADER_COLUMN]
             shader_assignments = self.material_list[index.row()].shader_assignments
-            if shader_model_name in shader_assignments and shader_assignments[shader_model_name] != None:
+            if (shader_model_name in shader_assignments and
+                    shader_assignments[shader_model_name] is not None):
                 shader = shader_assignments[shader_model_name]
                 if self.__shader_inputs_empty[shader]:
                     return "No MultiChannel Bake Point or Channel node attached to the Shader"
         return None
 
     def setData(self, index, value, role):
-        if role == qt.CheckStateRole and index.column()==MATERIAL_COLUMN:
+        """Apply user edits to the check state of the material column."""
+        if role == core.Qt.CheckStateRole and index.column() == MATERIAL_COLUMN:
             material = self.material_list[index.row()]
             material.checked = value
             self.dataChanged.emit(index, index, [role])
-            self.dataChanged.emit(index, self.createIndex(index.row(), self.columnCount()-1), [qt.ForegroundRole])
+            self.dataChanged.emit(index, self.createIndex(index.row(), self.columnCount()-1), [core.Qt.ForegroundRole])
             return True
         return super(Material_Model, self).setData(index, value, role)
 
     def index(self, row, column, parent=core.QModelIndex()):
+        """Return a flat model index for ``(row, column)``; this model has no parents."""
         return self.createIndex(row, column)
 
     def flags(self, index):
+        """Mark the material name editable/checkable and shader columns editable."""
         default_flags = super(Material_Model, self).flags(index)
         if index.column() == MATERIAL_COLUMN:
-            return default_flags | qt.ItemIsEditable | qt.ItemIsUserCheckable
+            return default_flags | core.Qt.ItemIsEditable | core.Qt.ItemIsUserCheckable
         elif index.column() >= SHADER_COLUMN:
-            return default_flags | qt.ItemIsEditable
+            return default_flags | core.Qt.ItemIsEditable
         return default_flags
 
     def parent(self, index):
+        """Return an invalid index since this model is flat."""
         return core.QModelIndex()
 
     def rowCount(self, parent=core.QModelIndex()):
+        """Return the number of materials."""
         return len(self.material_list)
 
     def columnCount(self, parent=core.QModelIndex()):
+        """Return the selection-group + material + per-shader-model column count."""
         return len(self.shader_model_list) + SHADER_COLUMN
 
+
 class ExportItemModel(mari.system.batch_export_dialog.ExportItemModel):
+    """Subclass overriding cell display to show stream names instead of channel/node names."""
+
     def __init__(self, geoEntities, view):
+        """Initialise the model for the given ``geoEntities`` and parent ``view``."""
         super(ExportItemModel, self).__init__(geoEntities, view)
 
     def data(self, index, role):
+        """Return stream name for the first column; otherwise defer to the base implementation."""
         index = resolveSourceIndex(index)
-        if role == qt.DisplayRole and index.column()==0:
+        if role == core.Qt.DisplayRole and index.column() == 0:
             # Shown stream names instead of channel/node names
             item = index.internalPointer()
             if isinstance(item, mari.ExportItem):
                 if item.hasMetadata("_STREAM"):
                     return item.metadata("_STREAM")
-        elif role == qt.DecorationRole:
+        elif role == core.Qt.DecorationRole:
             return None
         return super(ExportItemModel, self).data(index, role)
 
 
 class ExportItemFilterModel(core.QSortFilterProxyModel):
+    """Proxy model that restricts the export-items view to an allowlist and optional check filter."""
+
     def __init__(self, parent=None):
+        """Initialise the proxy with an empty allowlist and no hide-unchecked filter."""
         super(ExportItemFilterModel, self).__init__(parent)
         self.__export_items = set()
         self.__hide_unchecked = False
 
     def itemVisible(self, item):
+        """Return ``True`` when ``item`` is in the allowlist and passes the hide-unchecked filter."""
         # Hide the items not in the allowlist
-        if not item in self.__export_items:
+        if item not in self.__export_items:
             return False
 
         # Hide the item if the hide button is checked and the item is unchecked
@@ -524,24 +616,31 @@ class ExportItemFilterModel(core.QSortFilterProxyModel):
         return True
 
     def setExportItems(self, export_items):
+        """Replace the set of export items that should be visible."""
         self.__export_items = export_items
 
     def setHideUnchecked(self, hide):
+        """Toggle hiding of unchecked rows and invalidate the proxy."""
         self.__hide_unchecked = hide
         self.invalidate()
 
     def filterAcceptsRow(self, sourceRow, sourceParent):
+        """Accept GeoEntity rows unconditionally; defer to :meth:`itemVisible` for export items."""
         index = self.sourceModel().index(sourceRow, 0, sourceParent)
 
         item = index.internalPointer()
-        if isinstance(item,mari.GeoEntity):
+        if isinstance(item, mari.GeoEntity):
             return True
 
         return self.itemVisible(item)
 
+
 class EditSelectionGroupDialog(widgets.QDialog):
-    def __init__(self, selection_group_uuids, parent = None):
-        widgets.QDialog.__init__(self, parent = parent)
+    """Dialog for editing the face-selection groups bound to a material."""
+
+    def __init__(self, selection_group_uuids, parent=None):
+        """Build the two-list dialog preloaded with ``selection_group_uuids`` on the right."""
+        widgets.QDialog.__init__(self, parent=parent)
 
         self.setWindowTitle("Edit Material Selection Group Assignments")
 
@@ -552,13 +651,22 @@ class EditSelectionGroupDialog(widgets.QDialog):
         layout.addWidget(widgets.QLabel("Material Selection Groups"), 0, 2)
 
         self.project_selection_groups_list = widgets.QListWidget(self)
-        self.project_selection_groups_list.setSelectionMode(self.project_selection_groups_list.ExtendedSelection)
+        if QT_VERSION == "PySide6":
+            self.project_selection_groups_list.setSelectionMode(
+                self.project_selection_groups_list.SelectionMode.ExtendedSelection)
+        else:
+            self.project_selection_groups_list.setSelectionMode(
+                self.project_selection_groups_list.ExtendedSelection)
         layout.addWidget(self.project_selection_groups_list, 1, 0)
 
         self.material_selection_groups_list = widgets.QListWidget(self)
-        self.material_selection_groups_list.setSelectionMode(self.material_selection_groups_list.ExtendedSelection)
+        if QT_VERSION == "PySide6":
+            self.material_selection_groups_list.setSelectionMode(
+                self.material_selection_groups_list.SelectionMode.ExtendedSelection)
+        else:
+            self.material_selection_groups_list.setSelectionMode(
+                self.material_selection_groups_list.ExtendedSelection)
         layout.addWidget(self.material_selection_groups_list, 1, 2)
-
 
         button_layout = widgets.QVBoxLayout()
         move_all_right_button = widgets.QPushButton(mari.resources.createIcon("MoveAllRight.png"), "", self)
@@ -582,7 +690,7 @@ class EditSelectionGroupDialog(widgets.QDialog):
         for selection_group in mari.selection_groups.list():
             if isinstance(selection_group, mari.FaceSelectionGroup):
                 item = widgets.QListWidgetItem(selection_group.name())
-                item.setData(qt.UserRole, selection_group.uuid())
+                item.setData(core.Qt.UserRole, selection_group.uuid())
                 self.project_selection_groups_list.addItem(item)
 
         self.addItems(selection_group_uuids)
@@ -594,6 +702,7 @@ class EditSelectionGroupDialog(widgets.QDialog):
         buttons.rejected.connect(self.reject)
 
     def addItems(self, selection_group_uuids):
+        """Add the named project selection groups to the material list, skipping duplicates."""
         project_selection_group_map = {}
         for selection_group in mari.selection_groups.list():
             if isinstance(selection_group, mari.FaceSelectionGroup):
@@ -602,59 +711,72 @@ class EditSelectionGroupDialog(widgets.QDialog):
         existing_uuids = set()
         for i in range(self.material_selection_groups_list.count()):
             item = self.material_selection_groups_list.item(i)
-            existing_uuids.add(item.data(qt.UserRole))
+            existing_uuids.add(item.data(core.Qt.UserRole))
 
         for selection_group_uuid in selection_group_uuids:
             if selection_group_uuid in existing_uuids:
                 continue
             if selection_group_uuid in project_selection_group_map:
                 item = widgets.QListWidgetItem(project_selection_group_map[selection_group_uuid].name())
-                item.setData(qt.UserRole, selection_group_uuid)
+                item.setData(core.Qt.UserRole, selection_group_uuid)
                 self.material_selection_groups_list.addItem(item)
 
     def addAll(self):
+        """Move every project selection group into the material list."""
         selection_group_uuids = []
         for i in range(self.project_selection_groups_list.count()):
             item = self.project_selection_groups_list.item(i)
-            selection_group_uuids.append(item.data(qt.UserRole))
+            selection_group_uuids.append(item.data(core.Qt.UserRole))
         self.addItems(selection_group_uuids)
 
-
     def addSelected(self):
+        """Move the currently selected project selection groups into the material list."""
         selection_group_uuids = []
         for item in self.project_selection_groups_list.selectedItems():
-            selection_group_uuids.append(item.data(qt.UserRole))
+            selection_group_uuids.append(item.data(core.Qt.UserRole))
         self.addItems(selection_group_uuids)
 
     def removeAll(self):
+        """Clear every entry from the material selection-groups list."""
         self.material_selection_groups_list.clear()
 
     def removeSelected(self):
+        """Remove the currently selected entries from the material selection-groups list."""
         for item in self.material_selection_groups_list.selectedItems():
             self.material_selection_groups_list.takeItem(self.material_selection_groups_list.row(item))
 
     def materialSelectionGroups(self):
+        """Return the UUIDs currently assigned to the material as a list."""
         selection_group_uuids = []
         for i in range(self.material_selection_groups_list.count()):
             item = self.material_selection_groups_list.item(i)
-            selection_group_uuids.append(item.data(qt.UserRole))
+            selection_group_uuids.append(item.data(core.Qt.UserRole))
         return selection_group_uuids
 
+
 class SelectionGroupListWidget(widgets.QListWidget):
-    def __init__(self, parent = None):
-        widgets.QListWidget.__init__(self, parent = parent)
+    """List widget showing the face-selection groups bound to the active material; supports drag-drop."""
+
+    def __init__(self, parent=None):
+        """Initialise the list widget and enable drop-only drag/drop for selection groups."""
+        widgets.QListWidget.__init__(self, parent=parent)
 
         self.__material = None
 
         self.setAcceptDrops(True)
         self.setDragDropMode(widgets.QAbstractItemView.DropOnly)
 
-        self.setSelectionMode(self.ExtendedSelection)
+        if QT_VERSION == "PySide6":
+            self.setSelectionMode(self.SelectionMode.ExtendedSelection)
+        else:
+            self.setSelectionMode(self.ExtendedSelection)
 
     def supportedDropActions(self):
-        return qt.CopyAction | qt.MoveAction
+        """Accept copy and move drop actions."""
+        return core.Qt.CopyAction | core.Qt.MoveAction
 
     def dragEnterEvent(self, event):
+        """Accept drops carrying the face-selection-group mimetype."""
         if event.mimeData().hasFormat(FACE_SELECTION_GROUP_MIMETYPE):
             event.acceptProposedAction()
             event.accept()
@@ -663,6 +785,7 @@ class SelectionGroupListWidget(widgets.QListWidget):
             return super(SelectionGroupListWidget, self).dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
+        """Accept drag-move events for the face-selection-group mimetype."""
         if event.mimeData().hasFormat(FACE_SELECTION_GROUP_MIMETYPE):
             event.acceptProposedAction()
             event.accept()
@@ -671,36 +794,41 @@ class SelectionGroupListWidget(widgets.QListWidget):
             return super(SelectionGroupListWidget, self).dragMoveEvent(event)
 
     def updateSelectionGroups(self):
+        """Refresh the list to mirror the material's currently assigned selection groups."""
         self.clear()
 
-        if self.__material == None:
+        if self.__material is None:
             return
 
         selection_group_map = {}
         for selection_group in mari.selection_groups.list():
             selection_group_map[selection_group.uuid()] = selection_group
 
-            # Maintain a single signal connection to a name change of geometry selection group so that the names in this list are dynamically updated
-            selection_group.nameChanged.connect(self.updateSelectionGroups, qt.UniqueConnection)
+            # Maintain a single signal connection to a name change of geometry selection group
+            # so that the names in this list are dynamically updated
+            selection_group.nameChanged.connect(
+                self.updateSelectionGroups, core.Qt.UniqueConnection)
 
-        for uuid in self.__material.selection_groups:
-            if uuid in selection_group_map:
-                selection_group = selection_group_map[uuid]
+        for group_uuid in self.__material.selection_groups:
+            if group_uuid in selection_group_map:
+                selection_group = selection_group_map[group_uuid]
                 item = widgets.QListWidgetItem(selection_group.name())
-                item.setData(qt.UserRole, selection_group.uuid())
+                item.setData(core.Qt.UserRole, selection_group.uuid())
                 self.addItem(item)
 
     def setMaterial(self, material):
+        """Bind this widget to ``material`` and refresh the displayed groups."""
         self.__material = material
 
         self.clear()
         self.updateSelectionGroups()
 
     def dropMimeData(self, index, data, action):
+        """Append the dropped face-selection-group UUID to the active material."""
         if data.hasFormat(FACE_SELECTION_GROUP_MIMETYPE):
-            faceselectiongroup_uuid = str(data.data(FACE_SELECTION_GROUP_MIMETYPE), 'utf-8')
+            faceselectiongroup_uuid = str(data.data(FACE_SELECTION_GROUP_MIMETYPE), "utf-8")
             for selection_group in mari.selection_groups.list():
-                if selection_group.uuid()==faceselectiongroup_uuid:
+                if selection_group.uuid() == faceselectiongroup_uuid:
                     if self.__material:
                         self.__material.selection_groups.append(faceselectiongroup_uuid)
                         self.updateSelectionGroups()
@@ -708,30 +836,37 @@ class SelectionGroupListWidget(widgets.QListWidget):
         return super(SelectionGroupListWidget, self).dropMimeData(index, data, action)
 
     def assignGeometrySelectionGroupsFromProject(self):
+        """Append the project's currently selected face-selection groups to the material."""
         if self.__material:
             for selection_group in mari.selection_groups.selection():
-                if isinstance(selection_group, mari.FaceSelectionGroup) and not selection_group.uuid() in self.__material.selection_groups:
+                if (isinstance(selection_group, mari.FaceSelectionGroup) and
+                        selection_group.uuid() not in self.__material.selection_groups):
                     self.__material.selection_groups.append(selection_group.uuid())
             self.updateSelectionGroups()
 
     def editSelectionGroups(self):
+        """Open :class:`EditSelectionGroupDialog` to bulk-edit the material's groups."""
         if self.__material:
             dialog = EditSelectionGroupDialog(self.__material.selection_groups)
-            if dialog.exec_() == dialog.Accepted:
+            accepted = widgets.QDialog.DialogCode.Accepted if QT_VERSION == "PySide6" else widgets.QDialog.Accepted
+            if dialog.exec() == accepted:
                 self.__material.selection_groups = dialog.materialSelectionGroups()
                 self.updateSelectionGroups()
 
     def deleteSelectedSelectionGroups(self):
+        """Remove the currently selected groups from the active material."""
         if self.__material:
             for item in self.selectedItems():
-                uuid = item.data(qt.UserRole)
+                uuid = item.data(core.Qt.UserRole)
                 self.__material.selection_groups.remove(uuid)
             self.updateSelectionGroups()
 
     def contextMenuEvent(self, event):
+        """Show the right-click menu for assigning/editing/deleting selection groups."""
         menu = widgets.QMenu(self)
         assign_selection_groups = menu.addAction("Assign Currently Selected")
-        edit_selection_groups = menu.addAction(mari.resources.createIcon("Assign_SelectionGroup.svg"), "Edit Selection Groups")
+        edit_selection_groups = menu.addAction(
+            mari.resources.createIcon("Assign_SelectionGroup.svg"), "Edit Selection Groups")
         delete_selected = menu.addAction("Delete Selected")
         action = menu.exec_(self.mapToGlobal(event.pos()))
 
@@ -742,9 +877,13 @@ class SelectionGroupListWidget(widgets.QListWidget):
         elif action == delete_selected:
             self.deleteSelectedSelectionGroups()
 
+
 class VendorSpecificSettingsDialog(widgets.QDialog):
-    def __init__(self, parent = None):
-        widgets.QDialog.__init__(self, parent = parent)
+    """Modal dialog showing per-shader-vendor settings widgets in a tabbed view."""
+
+    def __init__(self, parent=None):
+        """Construct one tab per shader that registers a settings-widget callback."""
+        widgets.QDialog.__init__(self, parent=parent)
 
         dialog_layout = widgets.QVBoxLayout()
         self.setLayout(dialog_layout)
@@ -756,24 +895,29 @@ class VendorSpecificSettingsDialog(widgets.QDialog):
 
         tab_widget = widgets.QTabWidget(self)
         for shader_id in shader_ids:
-            settings_widget_func = usdShadeExport.functionCallbackForShader(shader_id, usdShadeExport.CALLBACK_NAME_SETTINGS_WIDGET)
+            settings_widget_func = usdShadeExport.functionCallbackForShader(
+                shader_id, usdShadeExport.CALLBACK_NAME_SETTINGS_WIDGET)
             if settings_widget_func is None:
                 continue
-            
+
             settings_widget = settings_widget_func()
             if not isinstance(settings_widget, widgets.QWidget):
                 continue
-            
+
             tab_widget.addTab(settings_widget, shader_id)
-        
+
         if tab_widget.count() == 0:
             dialog_layout.addWidget(widgets.QLabel("No Shader Specific Settings"))
             return
-        
+
         dialog_layout.addWidget(tab_widget)
 
+
 class MultiShaderExportWidget(widgets.QWidget):
-    def __init__(self, parent = None):
+    """Main widget for the multi-shader export dialog; assembles the materials grid and export controls."""
+
+    def __init__(self, parent=None):
+        """Build the widget tree, restore persisted state and wire signal connections."""
         widgets.QWidget.__init__(self, parent)
 
         main_layout = widgets.QVBoxLayout()
@@ -783,7 +927,7 @@ class MultiShaderExportWidget(widgets.QWidget):
 
         self.model = Material_Model()
 
-        button_layout = widgets.QHBoxLayout() 
+        button_layout = widgets.QHBoxLayout()
         main_layout.addLayout(button_layout)
 
         middle_layout = widgets.QHBoxLayout()
@@ -802,7 +946,8 @@ class MultiShaderExportWidget(widgets.QWidget):
 
         button_layout.addSpacerItem(widgets.QSpacerItem(0, 0, widgets.QSizePolicy.MinimumExpanding))
 
-        vendor_settings_dialog_button = widgets.QPushButton(mari.resources.createIcon("USD_ExportManager_Settings.svg"), "", self)
+        vendor_settings_dialog_button = widgets.QPushButton(
+            mari.resources.createIcon("USD_ExportManager_Settings.svg"), "", self)
         vendor_settings_dialog_button.pressed.connect(self.showVendorSpecificSettings)
         vendor_settings_dialog_button.setToolTip("View Shader Specific Settings")
         button_layout.addWidget(vendor_settings_dialog_button)
@@ -811,8 +956,12 @@ class MultiShaderExportWidget(widgets.QWidget):
         self.view = Material_View(self)
         self.view.setModel(self.model)
         self.view.horizontalHeader().setSectionResizeMode(widgets.QHeaderView.Stretch)
-        self.view.setSelectionBehavior(self.view.SelectRows)
-        self.view.setSelectionMode(self.view.ExtendedSelection)
+        if QT_VERSION == "PySide6":
+            self.view.setSelectionBehavior(self.view.SelectionBehavior.SelectRows)
+            self.view.setSelectionMode(self.view.SelectionMode.ExtendedSelection)
+        else:
+            self.view.setSelectionBehavior(self.view.SelectRows)
+            self.view.setSelectionMode(self.view.ExtendedSelection)
         self.view.setItemDelegate(ShaderAssignment_Item_Delegate(parent=self))
         self.view.initialize()
         middle_layout.addWidget(self.view, 3)
@@ -829,7 +978,8 @@ class MultiShaderExportWidget(widgets.QWidget):
         delete_selection_group_button = widgets.QPushButton(mari.resources.createIcon("Minus.png"), "", self)
         selection_group_label_layout.addWidget(delete_selection_group_button)
 
-        edit_selection_group_button = widgets.QPushButton(mari.resources.createIcon("Assign_SelectionGroup.svg"), "", self)
+        edit_selection_group_button = widgets.QPushButton(
+            mari.resources.createIcon("Assign_SelectionGroup.svg"), "", self)
         selection_group_label_layout.addWidget(edit_selection_group_button)
 
         self.selection_group_widget = SelectionGroupListWidget(self)
@@ -847,52 +997,72 @@ class MultiShaderExportWidget(widgets.QWidget):
         for index, stretch in enumerate((10, 20, 10, 20)):
             options_layout.setColumnStretch(index, stretch)
 
-        self.export_usd_target_dir_widget = FileBrowseWidget(self, widgets.QFileDialog.Directory, "", load_paths("UsdMultiTargetDirPaths", mari.resources.path("MARI_DEFAULT_EXPORT_PATH")))
+        self.export_usd_target_dir_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.Directory, "",
+            load_paths("UsdMultiTargetDirPaths", mari.resources.path("MARI_DEFAULT_EXPORT_PATH")))
         target_dir_label = widgets.QLabel("Texture Target Directory", self)
-        target_dir_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        target_dir_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(target_dir_label, 0, 0)
         options_layout.addWidget(self.export_usd_target_dir_widget, 0, 1)
-        
+
         look_file_filter = "USD Look File (*.usd *.usda *.usdz)"
-        self.look_file_widget = FileBrowseWidget(self, widgets.QFileDialog.AnyFile, look_file_filter, load_paths("UsdMultiLookPaths", os.path.join(mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "LookFile.usda")))
+        default_look_path = os.path.join(
+            mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "LookFile.usda")
+        self.look_file_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.AnyFile, look_file_filter,
+            load_paths("UsdMultiLookPaths", default_look_path))
         look_file_label = widgets.QLabel("USD Look File", self)
-        look_file_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        look_file_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(look_file_label, 1, 0)
         options_layout.addWidget(self.look_file_widget, 1, 1)
 
         assembly_file_filter = "USD Assembly File (*.usd *.usda *.usdz)"
-        self.assembly_file_widget = FileBrowseWidget(self, widgets.QFileDialog.AnyFile, assembly_file_filter, load_paths("UsdMultiAssemblyPaths", os.path.join(mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "Assembly.usda")))
-        assembly_file_label= widgets.QLabel("USD Assembly File", self)
-        assembly_file_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        default_assembly_path = os.path.join(
+            mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "Assembly.usda")
+        self.assembly_file_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.AnyFile, assembly_file_filter,
+            load_paths("UsdMultiAssemblyPaths", default_assembly_path))
+        assembly_file_label = widgets.QLabel("USD Assembly File", self)
+        assembly_file_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(assembly_file_label, 2, 0)
         options_layout.addWidget(self.assembly_file_widget, 2, 1)
-        
+
         payload_file_filter = "USD (*.usd *.usda *.usdz)"
-        self.payload_file_widget = FileBrowseWidget(self, widgets.QFileDialog.ExistingFile, payload_file_filter, load_paths("UsdMultiPayloadPaths", os.path.join(mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "Payload.usd")))
+        default_payload_path = os.path.join(
+            mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "Payload.usd")
+        self.payload_file_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.ExistingFile, payload_file_filter,
+            load_paths("UsdMultiPayloadPaths", default_payload_path))
         payload_label = widgets.QLabel("USD Payload", self)
-        payload_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        payload_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(payload_label, 3, 0)
         options_layout.addWidget(self.payload_file_widget, 3, 1)
 
         self.default_depth_combo_box = widgets.QComboBox(self)
         self.default_depth_combo_box.setSizePolicy(widgets.QSizePolicy.Expanding, widgets.QSizePolicy.Fixed)
         self.default_depth_combo_box.addItem("No Overrides", None)
-        self.default_depth_combo_box.setToolTip("Overrides the bit depth of exported export items.\nWill not change export item until Export is triggered, will not change export items which are not exported.")
+        depth_tooltip = ("Overrides the bit depth of exported export items.\n"
+                         "Will not change export item until Export is triggered, "
+                         "will not change export items which are not exported.")
+        self.default_depth_combo_box.setToolTip(depth_tooltip)
         for depth in mari.exports.depthList():
             self.default_depth_combo_box.addItem(depth, depth)
         override_depth_label = widgets.QLabel("Override Depth", self)
-        override_depth_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        override_depth_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(override_depth_label, 0, 2)
         options_layout.addWidget(self.default_depth_combo_box, 0, 3)
 
         self.default_size_combo_box = widgets.QComboBox(self)
         self.default_size_combo_box.setSizePolicy(widgets.QSizePolicy.Expanding, widgets.QSizePolicy.Fixed)
         self.default_size_combo_box.addItem("No Overrides", None)
-        self.default_size_combo_box.setToolTip("Overrides the resolution of exported export items.\nWill not change export item until Export is triggered, will not change export items which are not exported.")
+        size_tooltip = ("Overrides the resolution of exported export items.\n"
+                        "Will not change export item until Export is triggered, "
+                        "will not change export items which are not exported.")
+        self.default_size_combo_box.setToolTip(size_tooltip)
         for size in mari.exports.resolutionList():
             self.default_size_combo_box.addItem(size, size)
         override_resolution_label = widgets.QLabel("Override Resolution", self)
-        override_resolution_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        override_resolution_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(override_resolution_label, 1, 2)
         options_layout.addWidget(self.default_size_combo_box, 1, 3)
 
@@ -900,11 +1070,11 @@ class MultiShaderExportWidget(widgets.QWidget):
         root_name = usdShadeExport.payloadDefaultRootName(self.payload_file_widget.path())
 
         self.root_name_widget = widgets.QLineEdit(self)
-        if root_name=="/root":
+        if root_name == "/root":
             root_name = load_text_value("UsdMultiRootName", root_name)
         self.root_name_widget.setText(root_name)
         root_name_label = widgets.QLabel("Root Name", self)
-        root_name_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        root_name_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(root_name_label, 2, 2)
         options_layout.addWidget(self.root_name_widget, 2, 3)
 
@@ -912,14 +1082,13 @@ class MultiShaderExportWidget(widgets.QWidget):
         uv_set_name = usdShadeExport.payloadDefaultUvSetName()
 
         self.uv_set_name_widget = widgets.QLineEdit(self)
-        if uv_set_name=="":
+        if uv_set_name == "":
             uv_set_name = load_text_value("UsdMultiUvSetName", "st")
         self.uv_set_name_widget.setText(uv_set_name)
         uv_set_name_label = widgets.QLabel("UV Set Name", self)
-        uv_set_name_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        uv_set_name_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(uv_set_name_label, 3, 2)
         options_layout.addWidget(self.uv_set_name_widget, 3, 3)
-
 
         # Export Button
         export_button = widgets.QPushButton(mari.resources.createIcon("ExportFile.svg"), "Export", self)
@@ -934,10 +1103,12 @@ class MultiShaderExportWidget(widgets.QWidget):
         self.model.loadMaterials()
 
     def closeEvent(self, event):
+        """Persist materials before the widget is closed."""
         self.model.saveMaterials()
         event.accept()
 
     def saveSettings(self):
+        """Persist every path history and free-text option to user settings."""
         save_paths("UsdMultiTargetDirPaths", self.export_usd_target_dir_widget.paths())
         save_paths("UsdMultiLookPaths", self.look_file_widget.paths())
         save_paths("UsdMultiAssemblyPaths", self.assembly_file_widget.paths())
@@ -946,6 +1117,7 @@ class MultiShaderExportWidget(widgets.QWidget):
         save_text_value("UsdMultiUvSetName", self.uv_set_name_widget.text())
 
     def removeSelectedMaterials(self):
+        """Remove the currently selected material rows and refresh the selection-groups panel."""
         rows_to_remove = []
         for index in self.view.selectionModel().selectedRows():
             rows_to_remove.append(index.row())
@@ -953,8 +1125,9 @@ class MultiShaderExportWidget(widgets.QWidget):
         self.model.removeMaterials(rows_to_remove)
 
         self.updateSelectionGroups()
-        
+
     def showVendorSpecificSettings(self):
+        """Display the vendor settings dialog and re-run the setup callback for every export item."""
         dialog = VendorSpecificSettingsDialog(self)
         dialog.exec()
 
@@ -963,15 +1136,18 @@ class MultiShaderExportWidget(widgets.QWidget):
                 shader = material.shader_assignments[shader_model_name]
                 shader_model = shader.shaderModel()
 
-                setup_export_item_callback = usdShadeExport.functionCallbackForShader(shader_model.id(), usdShadeExport.CALLBACK_NAME_SETUP_EXPORT_ITEM)
+                setup_export_item_callback = usdShadeExport.functionCallbackForShader(
+                    shader_model.id(), usdShadeExport.CALLBACK_NAME_SETUP_EXPORT_ITEM)
                 if setup_export_item_callback is not None:
-                    for export_item, _ in getExportItems(shader):
+                    for export_item, _ in getExportItems(material, shader):
                         setup_export_item_callback(export_item)
 
     def exportRootPath(self):
+        """Return the configured texture target directory path."""
         return self.export_usd_target_dir_widget.path()
 
     def currentMaterial(self):
+        """Return the :class:`Material_Item` for the currently selected row, or ``None``."""
         current_index = self.view.currentIndex()
         row = current_index.row()
         if row >= 0 and row < len(self.model.material_list):
@@ -979,15 +1155,18 @@ class MultiShaderExportWidget(widgets.QWidget):
         return None
 
     def emitDataChangedForCurrentRow(self, column, roles):
+        """Emit ``dataChanged`` for ``column`` on the current row for the listed ``roles``."""
         index = self.view.currentIndex()
         index = self.model.createIndex(index.row(), column)
         self.model.dataChanged.emit(index, index, roles)
 
     def updateSelectionGroups(self):
+        """Refresh the selection-groups panel to match the current material."""
         material = self.currentMaterial()
         self.selection_group_widget.setMaterial(material)
 
     def exportUsd(self):
+        """Run the USD shade-look export for every checked material/shader assignment."""
         self.saveSettings()
         self.model.saveMaterials()
 
@@ -998,7 +1177,11 @@ class MultiShaderExportWidget(widgets.QWidget):
             usd_export_parameters.setAssemblyTargetFilename(self.assembly_file_widget.path())
             usd_export_parameters.setPayloadSourcePath(self.payload_file_widget.path())
             usd_export_parameters.setStageRootPath(self.root_name_widget.text())
-            usd_export_parameters.setExportOverrides({"RESOLUTION":self.default_size_combo_box.currentText(), "DEPTH":self.default_depth_combo_box.currentText()})
+            export_overrides = {
+                "RESOLUTION": self.default_size_combo_box.currentText(),
+                "DEPTH": self.default_depth_combo_box.currentText()
+            }
+            usd_export_parameters.setExportOverrides(export_overrides)
 
             usd_material_sources = []
             for material in self.model.material_list:
@@ -1027,7 +1210,8 @@ class MultiShaderExportWidget(widgets.QWidget):
                         continue
 
                     # Execute the ExportExportItem callback function for the vendor.
-                    export_export_item_callback = usdShadeExport.functionCallbackForShader(shader_model_name, usdShadeExport.CALLBACK_NAME_EXPORT_EXPORT_ITEM)
+                    export_export_item_callback = usdShadeExport.functionCallbackForShader(
+                        shader_model_name, usdShadeExport.CALLBACK_NAME_EXPORT_EXPORT_ITEM)
 
                     usd_material_source = usdShadeExport.UsdMaterialSource(material.name)
                     usd_material_source.setBindingLocations(current_geo_version.sourceMeshLocationList())
@@ -1048,11 +1232,12 @@ class MultiShaderExportWidget(widgets.QWidget):
             mari.utils.message(error.message, error.title, icon=widgets.QMessageBox.Critical, details=error.details)
 
     def editShaderInputs(self):
+        """Open :class:`EditShaderInputsDialog` for the shader at the current grid index."""
         index = self.view.currentIndex()
         shader_model_name = self.model.shader_model_list[index.column()-SHADER_COLUMN]
         material = self.model.material_list[index.row()]
         shader_assignments = material.shader_assignments
-        current_shader = None 
+        current_shader = None
         if shader_model_name in shader_assignments:
             current_shader = shader_assignments[shader_model_name]
 
@@ -1063,12 +1248,15 @@ class MultiShaderExportWidget(widgets.QWidget):
         for shader_name, shader in self.model.shader_map[shader_model_name]:
             shader_list.append((shader_name, shader))
 
-        dialog = EditShaderInputsDialog(shader_model_name, material, current_shader, shader_list, self.getOverrides(), self.exportRootPath())
+        dialog = EditShaderInputsDialog(
+            shader_model_name, material, current_shader, shader_list,
+            self.getOverrides(), self.exportRootPath())
 
         dialog.resize(1200, 600)
         dialog.exec_()
 
     def getOverrides(self):
+        """Return the dialog's current resolution/depth/colorspace/post-process overrides."""
         overrides = {}
         overrides["RESOLUTION"] = self.default_size_combo_box.currentText()
         overrides["DEPTH"] = self.default_depth_combo_box.currentText()
@@ -1077,12 +1265,18 @@ class MultiShaderExportWidget(widgets.QWidget):
         return overrides
 
     def onCloseTab(self):
+        """Persist settings and materials when the host tab is closed."""
         self.saveSettings()
         self.model.saveMaterials()
 
+
 class EditShaderInputsDialog(widgets.QDialog):
-    def __init__(self, shader_model_name, material, current_shader, shader_list, overrides, export_root_path, parent = None):
-        widgets.QDialog.__init__(self, parent = parent)
+    """Dialog for inspecting/editing per-shader export items, with preset save/load."""
+
+    def __init__(self, shader_model_name, material, current_shader, shader_list,
+                 overrides, export_root_path, parent=None):
+        """Build the dialog showing ``current_shader``'s export items inside ``material``."""
+        widgets.QDialog.__init__(self, parent=parent)
 
         self.setWindowTitle("Edit Shader Inputs")
 
@@ -1125,7 +1319,8 @@ class EditShaderInputsDialog(widgets.QDialog):
         self.shader_inputs_missing_label_icon = widgets.QLabel(self)
         self.shader_inputs_missing_label_icon.setPixmap(SHADER_ERROR_PIXMAP)
         shader_info_layout.addWidget(self.shader_inputs_missing_label_icon)
-        self.shader_inputs_missing_label = widgets.QLabel("No MultiChannelBakePoint or Channel node attached to the Shader", self)
+        self.shader_inputs_missing_label = widgets.QLabel(
+            "No MultiChannelBakePoint or Channel node attached to the Shader", self)
         shader_info_layout.addWidget(self.shader_inputs_missing_label)
         shader_info_layout.addSpacerItem(widgets.QSpacerItem(0, 0, widgets.QSizePolicy.MinimumExpanding))
         dialog_layout.addLayout(shader_info_layout)
@@ -1143,19 +1338,23 @@ class EditShaderInputsDialog(widgets.QDialog):
         self.export_item_view = export_item_view
 
         context_menu_actions = []
-        action = widgets.QAction("Check Selected")
+        action = QAction("Check Selected")
         action.triggered.connect(export_item_view.checkSelected)
         context_menu_actions.append(action)
-        action = widgets.QAction("Uncheck Selected")
+        action = QAction("Uncheck Selected")
         action.triggered.connect(export_item_view.uncheckSelected)
         context_menu_actions.append(action)
         export_item_view.setContextMenuActions(context_menu_actions)
 
-
         export_item_view.setItemDelegate(mari.system.batch_export_dialog.ComboBoxDelegate(parent=self))
         export_item_view.horizontalHeader().setStretchLastSection(True)
-        export_item_view.setSelectionBehavior(export_item_view.SelectRows)
-        export_item_view.setSelectionMode(export_item_view.ExtendedSelection)
+        if QT_VERSION == "PySide6":
+            export_item_view.setSelectionBehavior(export_item_view.SelectionBehavior.SelectRows)
+            export_item_view.setSelectionMode(export_item_view.SelectionMode.ExtendedSelection)
+        else:
+            export_item_view.setSelectionBehavior(export_item_view.SelectRows)
+            export_item_view.setSelectionMode(export_item_view.ExtendedSelection)
+
         export_item_view.horizontalHeader().setHighlightSections(False)
         export_item_view.setModel(self.export_item_filter_model)
         export_item_view.setRootIndex(self.export_item_filter_model.mapFromSource(export_item_model.index(0, 0)))
@@ -1165,7 +1364,7 @@ class EditShaderInputsDialog(widgets.QDialog):
 
         close_button = widgets.QPushButton("Close", self)
         close_button.pressed.connect(self.accept)
-        dialog_layout.addWidget(close_button, alignment = qt.AlignRight)
+        dialog_layout.addWidget(close_button, alignment=core.Qt.AlignRight)
 
         # Populate ExportItems + update the stated
         self.onShaderInputEditCurrentShaderChanged()
@@ -1174,12 +1373,15 @@ class EditShaderInputsDialog(widgets.QDialog):
         export_item_model.updateStatus()
 
     def getOverrides(self):
+        """Return the dialog's currently applied override values."""
         return self.__overrides
 
     def exportRootPath(self):
+        """Return the parent dialog's texture target directory."""
         return self.__export_root_path
 
     def updateExportItems(self, shader):
+        """Refresh the visible export items to those owned by ``shader`` on the active material."""
         export_items = []
         if shader:
             export_items = getExportItems(self.__material, shader)
@@ -1191,17 +1393,20 @@ class EditShaderInputsDialog(widgets.QDialog):
         return export_items
 
     def onShaderInputEditCurrentShaderChanged(self):
+        """Re-populate the export-item view whenever the shader combobox selection changes."""
         current_shader = self.shader_combobox.currentData()
 
-        # We call updateExportItems to populate the export item list of the filter model and also to determine whether to show the warning message
+        # We call updateExportItems to populate the export item list of the filter model
+        # and also to determine whether to show the warning message
         export_items = self.updateExportItems(current_shader)
-        no_inputs = len(export_items)==0
+        no_inputs = len(export_items) == 0
         self.shader_inputs_missing_label.setVisible(no_inputs)
         self.shader_inputs_missing_label_icon.setVisible(no_inputs)
 
         self.export_item_filter_model.invalidate()
 
     def onSavePreset(self):
+        """Serialise every visible export item to an ``.mumm`` XML preset file."""
         save_file_name = mari.utils.getSaveFileName(parent=self, caption="Save Export Settings", filter="*.mumm")
         if not save_file_name:
             return
@@ -1217,6 +1422,7 @@ class EditShaderInputsDialog(widgets.QDialog):
         tree.write(save_file_name)
 
     def onLoadPreset(self):
+        """Load an ``.mumm`` XML preset and apply its values to matching export items."""
         open_file_name = mari.utils.getOpenFileName(parent=self, caption="Load Export Settings", filter="*.mumm")
         if not open_file_name:
             return
@@ -1224,24 +1430,23 @@ class EditShaderInputsDialog(widgets.QDialog):
         tree = etree.parse(open_file_name)
         tree_root = tree.getroot()
 
-        NodeAdded = False
-        InvalidImportedItemList = []
         for child in tree_root:
             loaded_item = mari.ExportItem()
 
-            loaded_item.deserializeFromString(etree.tostring(child, encoding='unicode'))
+            loaded_item.deserializeFromString(etree.tostring(child, encoding="unicode"))
 
             for export_item in self.exportItems:
-                if loaded_item.hasMetadata("_STREAM") and export_item.hasMetadata("_STREAM") and loaded_item.metadata("_STREAM") == export_item.metadata("_STREAM"):
+                if (loaded_item.hasMetadata("_STREAM") and export_item.hasMetadata("_STREAM") and
+                        loaded_item.metadata("_STREAM") == export_item.metadata("_STREAM")):
                     # Found matching export items. Copy over the values
-                    export_item.setExportEnabled( loaded_item.exportEnabled() )
-                    export_item.setResolution( loaded_item.resolution() )
-                    export_item.setDepth( loaded_item.depth() )
-                    export_item.setColorspace( loaded_item.colorspace() )
-                    export_item.setPostProcessCommand( loaded_item.postProcessCommand() )
-                    export_item.setFileTemplate( loaded_item.fileTemplate() )
-                    export_item.setFileOptions( loaded_item.fileOptions() )
-                    export_item.setUvIndexList( loaded_item.uvIndexList() )
+                    export_item.setExportEnabled(loaded_item.exportEnabled())
+                    export_item.setResolution(loaded_item.resolution())
+                    export_item.setDepth(loaded_item.depth())
+                    export_item.setColorspace(loaded_item.colorspace())
+                    export_item.setPostProcessCommand(loaded_item.postProcessCommand())
+                    export_item.setFileTemplate(loaded_item.fileTemplate())
+                    export_item.setFileOptions(loaded_item.fileOptions())
+                    export_item.setUvIndexList(loaded_item.uvIndexList())
                     continue
 
         # Update the model and view
@@ -1249,7 +1454,9 @@ class EditShaderInputsDialog(widgets.QDialog):
 
 
 def generateUsdMultiShaderExportWidget():
+    """Create and return a new :class:`MultiShaderExportWidget` for the export dialog."""
     return MultiShaderExportWidget()
+
 
 if mari.app.isRunning():
     # Register the USD Multi Shader Export tab to the Export Manager
@@ -1258,5 +1465,5 @@ if mari.app.isRunning():
     except ValueError:
         pass
 
-    mari.system.batch_export_dialog.registerCustomTabWidgetCallback("USD Look Exporter", generateUsdMultiShaderExportWidget)
-
+    mari.system.batch_export_dialog.registerCustomTabWidgetCallback(
+        "USD Look Exporter", generateUsdMultiShaderExportWidget)

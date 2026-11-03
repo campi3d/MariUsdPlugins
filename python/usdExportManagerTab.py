@@ -20,14 +20,33 @@
 # KIND, either express or implied. See the Apache License for the specific
 # language governing permissions and limitations under the Apache License.
 
+"""USD Export Manager tab UI for Mari.
+
+Hosts the Qt models, item delegates and main :class:`USDExportWidget`
+that drive Mari's *USD Export* tab: per-object shader assignment, the
+per-shader export-item table, default/override controls (resolution,
+color space, depth, format), and the *Export to USD* action that drives
+:mod:`usdShadeExport`.
+"""
+
+import importlib
 import os
 import traceback
+
 import mari
-import PySide2.QtCore as core
-import PySide2.QtGui as gui
-import PySide2.QtWidgets as widgets
-from PySide2.QtCore import Qt as qt
+
 from . import usdShadeExport as usd_shade_export
+
+for base_module in ["PySide6", "PySide2"]:  # Dual Qt6/Qt5 support.
+    try:
+        core = importlib.import_module(f"{base_module}.QtCore")
+        gui = importlib.import_module(f"{base_module}.QtGui")
+        widgets = importlib.import_module(f"{base_module}.QtWidgets")
+        break
+    except (ImportError, ModuleNotFoundError):
+        continue
+else:
+    raise ImportError("Neither PySide6 nor PySide2 is available")
 
 # ==============================================================================
 # Defaults
@@ -44,7 +63,11 @@ COL_EXPORT_COLOR_SPACE = 2
 COL_EXPORT_DEPTH = 3
 COL_EXPORT_FORMAT = 4
 
-BIT_DEPTHS = {mari.Image.DEPTH_BYTE : "8bit  (Byte)", mari.Image.DEPTH_HALF : "16bit (Half)", mari.Image.DEPTH_FLOAT: "32bit (Float)"}
+BIT_DEPTHS = {
+    mari.Image.Depth.DEPTH_BYTE: "8bit  (Byte)",
+    mari.Image.Depth.DEPTH_HALF: "16bit (Half)",
+    mari.Image.Depth.DEPTH_FLOAT: "32bit (Float)"
+}
 
 EXPORT_OVERRIDES = [None] * 5
 
@@ -52,23 +75,30 @@ EXPORT_OVERRIDES = [None] * 5
 # Shader Panel
 # ==============================================================================
 
+
 def get_relevant_shaders(geo_entity):
+    """Return the user-authored (non-system) shaders attached to ``geo_entity``."""
     return [shader for shader in geo_entity.shaderList() if not shader.isSystemShader()]
 
+
 class ShaderAssignment_Item(gui.QStandardItem):
-    def __init__(self, source_object = None):
+    """Model item that pairs a Mari ``GeoEntity`` row with its currently assigned shader."""
+
+    def __init__(self, source_object=None):
+        """Initialise the item wrapping ``source_object`` (a GeoEntity or Shader instance)."""
         gui.QStandardItem.__init__(self)
-        self.setData(source_object, qt.UserRole)
+        self.setData(source_object, core.Qt.UserRole)
 
     def set_geo_entity_meta_data(self, value):
+        """Persist the chosen shader's source-node UUID onto the row's GeoEntity metadata."""
         index = self.index()
         if not index.isValid():
             return
-        
+
         column = index.column()
         if column != COL_ASSIGN_SHADER:
             return
-            
+
         model = index.model()
         if not model:
             return
@@ -76,43 +106,50 @@ class ShaderAssignment_Item(gui.QStandardItem):
         geo_entity_item = model.item(index.row(), COL_ASSIGN_GEO_ENTITY)
         if not geo_entity_item:
             return
-            
-        geo_entity = geo_entity_item.data(qt.UserRole)
+
+        geo_entity = geo_entity_item.data(core.Qt.UserRole)
         if not geo_entity:
             return
-        
+
         source_node_uuid = ""
         if value:
             source_node = value.shaderNode()
             if source_node:
                 source_node_uuid = source_node.uuid()
-        
+
         geo_entity.setMetadata("UsdShaderNodeUuid", source_node_uuid)
 
     def setData(self, value, role):
-        if role == qt.UserRole:
+        """Forward ``UserRole`` writes through :meth:`set_geo_entity_meta_data` then store on the item."""
+        if role == core.Qt.UserRole:
             self.set_geo_entity_meta_data(value)
-            
+
         gui.QStandardItem.setData(self, value, role)
 
     def data(self, role):
-        if role == qt.DisplayRole:
-            source_object = self.data(qt.UserRole)
+        """Return the source object's ``name()`` for display, otherwise the stored value."""
+        if role == core.Qt.DisplayRole:
+            source_object = self.data(core.Qt.UserRole)
             if source_object:
                 return source_object.name()
             return ""
 
         return gui.QStandardItem.data(self, role)
 
+
 class ShaderAssignment_ItemDelegate(widgets.QStyledItemDelegate):
-    def __init__(self, parent = None):
-        widgets.QStyledItemDelegate.__init__(self, parent = parent)
+    """Item delegate that supplies a shader-picker combobox for the shader-assignment column."""
+
+    def __init__(self, parent=None):
+        """Initialise the delegate with the given Qt ``parent``."""
+        widgets.QStyledItemDelegate.__init__(self, parent=parent)
 
     def createEditor(self, parent, option, index):
+        """Create a combobox listing the relevant shaders of the row's GeoEntity."""
         if index.column() == COL_ASSIGN_SHADER:
             model = index.model()
-            geo_entity = model.item(index.row(), COL_ASSIGN_GEO_ENTITY).data(qt.UserRole)
-            
+            geo_entity = model.item(index.row(), COL_ASSIGN_GEO_ENTITY).data(core.Qt.UserRole)
+
             editor = widgets.QComboBox(parent)
             if geo_entity:
                 for geo_entity_shader in get_relevant_shaders(geo_entity):
@@ -125,110 +162,120 @@ class ShaderAssignment_ItemDelegate(widgets.QStyledItemDelegate):
         return widgets.QStyledItemDelegate.createEditor(self, parent, option, index)
 
     def setEditorData(self, editor, index):
+        """Sync the combobox selection to the model's currently stored shader."""
         if index.column() == COL_ASSIGN_SHADER and isinstance(editor, widgets.QComboBox):
             model = index.model()
-            geo_entity = model.item(index.row(), COL_ASSIGN_GEO_ENTITY).data(qt.UserRole)
-            shader = model.itemFromIndex(index).data(qt.UserRole)
+            geo_entity = model.item(index.row(), COL_ASSIGN_GEO_ENTITY).data(core.Qt.UserRole)
+            shader = model.itemFromIndex(index).data(core.Qt.UserRole)
             source_node_uuid = ""
             if shader and geo_entity:
                 source_node = shader.shaderNode()
                 if source_node:
                     source_node_uuid = source_node.uuid()
-                
+
                 try:
                     editor.setCurrentIndex(get_relevant_shaders(geo_entity).index(shader))
                 except ValueError:
                     pass
-                    
+
             if geo_entity:
                 geo_entity.setMetadata("UsdShaderNodeUuid", source_node_uuid)
-                
+
             return
 
         widgets.QStyledItemDelegate.setEditorData(self, editor, index)
 
     def setModelData(self, editor, model, index):
+        """Write the combobox's selected shader back to the model item."""
         if index.column() == COL_ASSIGN_SHADER and isinstance(editor, widgets.QComboBox):
-            geo_entity = model.item(index.row(), COL_ASSIGN_GEO_ENTITY).data(qt.UserRole)
-            shader = editor.itemData(editor.currentIndex(), qt.UserRole)
-            model.itemFromIndex(index).setData(shader, qt.UserRole)
+            shader = editor.itemData(editor.currentIndex(), core.Qt.UserRole)
+            model.itemFromIndex(index).setData(shader, core.Qt.UserRole)
             return
 
         widgets.QStyledItemDelegate.setModelData(self, editor, model, index)
 
     def updateEditorGeometry(self, editor, option, index):
+        """Resize the editor to fully cover the cell's view rectangle."""
         editor.setGeometry(option.rect)
 
     def finishEdit(self):
+        """Commit and close the combobox editor as soon as the user picks a value."""
         editor = self.sender()
         if isinstance(editor, widgets.QComboBox):
             self.commitData.emit(editor)
-            self.closeEditor.emit(editor, self.NoHint)
+            self.closeEditor.emit(editor, widgets.QAbstractItemDelegate.NoHint)
+
 
 class ShaderAssignment_Model(gui.QStandardItemModel):
-    def __init__(self, parent = None):
-        gui.QStandardItemModel.__init__(self, parent = parent)
+    """Item model exposing each Mari GeoEntity and its currently assigned export shader."""
+
+    def __init__(self, parent=None):
+        """Build the model and subscribe to Mari's entity-added/removed signals."""
+        gui.QStandardItemModel.__init__(self, parent=parent)
 
         geo_manager = mari.geo
-        
+
         self._refresh_geo_entity_list(True, False)
-        
+
         mari.utils.connect(geo_manager.entityAdded, self._on_geo_entity_added)
         mari.utils.connect(geo_manager.entityRemoved, self._on_geo_entity_removed)
 
     def parentObject(self):
+        """Return the QObject parent set on this model."""
         return core.QObject.parent(self)
 
-    def flags(self, index = core.QModelIndex()):
+    def flags(self, index=core.QModelIndex()):
+        """Make the GeoEntity column checkable and the shader column editable."""
         flags = gui.QStandardItemModel.flags(self, index)
         column = index.column()
         if column == COL_ASSIGN_GEO_ENTITY:
-            flags = flags |  qt.ItemIsUserCheckable
-            flags = flags & ~qt.ItemIsEditable
+            flags = flags | core.Qt.ItemIsUserCheckable
+            flags = flags & ~core.Qt.ItemIsEditable
         elif column == COL_ASSIGN_SHADER:
-            flags = flags |  qt.ItemIsEditable
-            flags = flags & ~qt.ItemIsUserCheckable
+            flags = flags | core.Qt.ItemIsEditable
+            flags = flags & ~core.Qt.ItemIsUserCheckable
         else:
-            flags = flags & ~(qt.ItemIsEditable | qt.ItemIsUserCheckable)
+            flags = flags & ~(core.Qt.ItemIsEditable | core.Qt.ItemIsUserCheckable)
         return flags
 
     def headerData(self, section, orientation, role):
-        if orientation == qt.Horizontal:
-            if role == qt.DisplayRole:
+        """Provide the centred horizontal column headers ``Object`` and ``Shader``."""
+        if orientation == core.Qt.Horizontal:
+            if role == core.Qt.DisplayRole:
                 if section == COL_ASSIGN_GEO_ENTITY:
                     return "Object"
                 elif section == COL_ASSIGN_SHADER:
                     return "Shader"
-            elif role == qt.TextAlignmentRole:
-                return qt.AlignHCenter
+            elif role == core.Qt.TextAlignmentRole:
+                return core.Qt.AlignHCenter
         return None
-        
+
     def selected_shaders(self):
+        """Return the shaders whose GeoEntity rows are currently checked for export."""
         shader_list = []
         for row in range(self.rowCount()):
             geo_entity_item = self.item(row, COL_ASSIGN_GEO_ENTITY)
-            if qt.Checked == geo_entity_item.data(qt.CheckStateRole):
+            if core.Qt.Checked == geo_entity_item.data(core.Qt.CheckStateRole):
                 shader_item = self.item(row, COL_ASSIGN_SHADER)
-                shader = shader_item.data(qt.UserRole)
+                shader = shader_item.data(core.Qt.UserRole)
                 if shader:
                     shader_list.append(shader)
         return shader_list
 
-    def _refresh_geo_entity_list(self, added = True, removed = True):
+    def _refresh_geo_entity_list(self, added=True, removed=True):
         new_geo_entities = mari.geo.list()
 
         # Delete any geo entities that were removed.
         if removed:
             for old_row in range(self.rowCount()-1, -1, -1):
-                if self.item(old_index, COL_ASSIGN_GEO_ENTITY).data(qt.UserRole) not in new_geo_entities:
-                    row_items = self.takeRow(old_row)
-                    del row_items
+                if self.item(old_row, COL_ASSIGN_GEO_ENTITY).data(core.Qt.UserRole) not in new_geo_entities:
+                    self.takeRow(old_row)
 
         # Add any new or move existing geo entities.
         if added:
             for new_row, new_geo_entity in enumerate(new_geo_entities):
                 for old_row in range(self.rowCount()):
-                    if self.item(old_row, COL_ASSIGN_GEO_ENTITY).data(qt.UserRole) == new_geo_entity:
+                    if self.item(old_row, COL_ASSIGN_GEO_ENTITY).data(core.Qt.UserRole) == new_geo_entity:
                         # Already exists, move if necessary.
                         if new_row != old_row:
                             self.insertRow(new_row, self.takeRow(old_row))
@@ -236,9 +283,9 @@ class ShaderAssignment_Model(gui.QStandardItemModel):
                 else:
                     # Doesn't already exist, add it.
                     new_geo_entity_item = ShaderAssignment_Item(new_geo_entity)
-                    new_geo_entity_item.setData(qt.Checked, qt.CheckStateRole)
+                    new_geo_entity_item.setData(core.Qt.Checked, core.Qt.CheckStateRole)
                     shaders = get_relevant_shaders(new_geo_entity)
-                    
+
                     default_shader = None if len(shaders) == 0 else shaders[0]
                     if new_geo_entity.hasMetadata("UsdShaderNodeUuid"):
                         saved_uuid = new_geo_entity.metadata("UsdShaderNodeUuid")
@@ -247,11 +294,11 @@ class ShaderAssignment_Model(gui.QStandardItemModel):
                             if node and node.uuid() == saved_uuid:
                                 default_shader = shader
                                 break
-                    
+
                     new_shader_item = ShaderAssignment_Item(default_shader)
-                    
+
                     self.insertRow(new_row, [new_geo_entity_item, new_shader_item])
-                    
+
                     # mari.utils.connect(new_geo_entity.shaderCreated, self._on_shader_created)
                     mari.utils.connect(new_geo_entity.shaderCreated, self._on_shader_removed)
 
@@ -260,98 +307,125 @@ class ShaderAssignment_Model(gui.QStandardItemModel):
 
     def _on_geo_entity_removed(self, entity):
         self._refresh_geo_entity_list(False, True)
-        
+
     def _on_shader_created(self, shader):
         # Don't actually care if shaders are added, the user would need to select them to have any effect.
         pass
-    
+
     def _on_shader_removed(self, shader):
         geo_entity = self.sender()
         for row in range(self.rowCount()):
-            if geo_entity == self.item(row, COL_ASSIGN_GEO_ENTITY).data(qt.UserRole):
+            if geo_entity == self.item(row, COL_ASSIGN_GEO_ENTITY).data(core.Qt.UserRole):
                 shader_item = self.item(row, COL_ASSIGN_SHADER)
-                if shader_item.data(qt.UserRole) not in get_relevant_shaders(geo_entity):
-                    shader_item.setData(None, qt.UserRole)
+                if shader_item.data(core.Qt.UserRole) not in get_relevant_shaders(geo_entity):
+                    shader_item.setData(None, core.Qt.UserRole)
                 break
 
+
 class ShaderAssignment_View(widgets.QTableView):
-    def __init__(self, parent = None):
-        widgets.QTableView.__init__(self, parent = parent)
+    """Table view paired with :class:`ShaderAssignment_Model` to display shader assignments."""
+
+    def __init__(self, parent=None):
+        """Configure the view with a stretching header and intuitive edit triggers."""
+        widgets.QTableView.__init__(self, parent=parent)
         self.horizontalHeader().setSectionResizeMode(widgets.QHeaderView.Stretch)
-        self.setEditTriggers(widgets.QAbstractItemView.CurrentChanged | widgets.QAbstractItemView.SelectedClicked | widgets.QAbstractItemView.DoubleClicked)
+        self.setEditTriggers(
+            widgets.QAbstractItemView.CurrentChanged |
+            widgets.QAbstractItemView.SelectedClicked |
+            widgets.QAbstractItemView.DoubleClicked
+        )
+
 
 # ==============================================================================
 # Export Item Panel
 # ==============================================================================
 
+
 def split_ext(path):
+    """Return ``(stem, lowercase_extension_without_dot)`` from ``path``."""
     file_name, file_ext = os.path.splitext(path)
-    file_ext = file_ext[1:].lower() if len(file_ext) > 0 and file_ext[0] == '.' else file_ext.lower()
+    file_ext = file_ext[1:].lower() if len(file_ext) > 0 and file_ext[0] == "." else file_ext.lower()
     return file_name, file_ext
 
+
 class ExportItem_ShaderItem(gui.QStandardItem):
-    def __init__(self, source_object = None):
+    """Top-level row item in the export-item tree, representing a single shader."""
+
+    def __init__(self, source_object=None):
+        """Initialise the item holding ``source_object`` as the user-role payload."""
         gui.QStandardItem.__init__(self)
-        self.setData(source_object, qt.UserRole)
+        self.setData(source_object, core.Qt.UserRole)
 
     def data(self, role):
-        if role == qt.DisplayRole:
-            source_object = self.data(qt.UserRole)
+        """Return the wrapped shader's ``name()`` for display roles."""
+        if role == core.Qt.DisplayRole:
+            source_object = self.data(core.Qt.UserRole)
             if source_object:
                 return source_object.name()
             return ""
-    
+
         return gui.QStandardItem.data(self, role)
-        
+
+
 class ExportItem_ShaderInputItem(gui.QStandardItem):
-    def __init__(self, source_object = None, text = "", input_name = ""):
+    """Child row item representing a shader input/channel mapped to a Mari export item."""
+
+    def __init__(self, source_object=None, text="", input_name=""):
+        """Store the source node, the shader input name and the displayed label."""
         gui.QStandardItem.__init__(self, text)
-        self.setData(source_object, qt.UserRole)
-        self.setData(None, qt.UserRole+1)
-        self.setData(input_name, qt.UserRole+2)
+        self.setData(source_object, core.Qt.UserRole)
+        self.setData(None, core.Qt.UserRole+1)
+        self.setData(input_name, core.Qt.UserRole+2)
 
     def setData(self, data, role):
-        if role == qt.CheckStateRole:
-            export_item = self.data(qt.UserRole+1)
+        """Toggle the underlying export item's enabled state when the check state changes."""
+        if role == core.Qt.CheckStateRole:
+            export_item = self.data(core.Qt.UserRole+1)
             if export_item:
-                if qt.Unchecked == data:
+                if core.Qt.Unchecked == data:
                     export_item.setExportEnabled(False)
                 else:
                     export_item.setExportEnabled(True)
-        
+
         gui.QStandardItem.setData(self, data, role)
 
     def data(self, role):
-        if role == qt.CheckStateRole:
-            export_item = self.data(qt.UserRole+1)
+        """Mirror the underlying export item's enabled state for the check-state role."""
+        if role == core.Qt.CheckStateRole:
+            export_item = self.data(core.Qt.UserRole+1)
             if export_item and export_item.exportEnabled():
-                return qt.Checked
+                return core.Qt.Checked
             else:
-                return qt.Unchecked
-    
+                return core.Qt.Unchecked
+
         return gui.QStandardItem.data(self, role)
 
+
 class ExportItem_SettingsItem(gui.QStandardItem):
-    def __init__(self, data = None, text = None):
+    """Per-setting cell (size, color space, depth, format) for a shader input row."""
+
+    def __init__(self, data=None, text=None):
+        """Initialise the cell with optional payload ``data`` and display ``text``."""
         gui.QStandardItem.__init__(self)
-        self.setData(data, qt.UserRole)
+        self.setData(data, core.Qt.UserRole)
         if text:
-            self.setData(text, qt.DisplayRole)
-        
+            self.setData(text, core.Qt.DisplayRole)
+
     def _export_item(self):
         index = self.index()
         if index.column() == COL_EXPORT_SHADER_INPUT_NODE:
-            return self.data(qt.UserRole+1)
-            
+            return self.data(core.Qt.UserRole+1)
+
         shader_input_index = index.sibling(index.row(), COL_EXPORT_SHADER_INPUT_NODE)
         shader_input_item = index.model().itemFromIndex(shader_input_index)
         if shader_input_item:
-            return shader_input_item.data(qt.UserRole+1)
+            return shader_input_item.data(core.Qt.UserRole+1)
 
         return None
 
     def data(self, role):
-        if role == qt.DisplayRole:
+        """Return the export item's effective setting (or override) formatted for display."""
+        if role == core.Qt.DisplayRole:
             column = self.index().column()
             if column >= 1 and column <= 4:
                 override = self.model().override(column)
@@ -379,7 +453,8 @@ class ExportItem_SettingsItem(gui.QStandardItem):
         return gui.QStandardItem.data(self, role)
 
     def setData(self, data, role):
-        if role == qt.UserRole:
+        """Apply the edited setting to the wrapped export item for its column."""
+        if role == core.Qt.UserRole:
             column = self.index().column()
             if column >= 1 and column <= 4:
                 export_item = self._export_item()
@@ -394,21 +469,26 @@ class ExportItem_SettingsItem(gui.QStandardItem):
                         file_name, file_ext = split_ext(export_item.fileTemplate())
                         export_item.setFileTemplate("%s.%s" % (file_name, data))
                     return
-            
+
         gui.QStandardItem.setData(self, data, role)
 
+
 class ExportItem_ItemDelegate(widgets.QStyledItemDelegate):
-    def __init__(self, parent = None):
-        widgets.QStyledItemDelegate.__init__(self, parent = parent)
+    """Item delegate providing combobox editors for size, color space, depth and format cells."""
+
+    def __init__(self, parent=None):
+        """Initialise the delegate with the given Qt ``parent``."""
+        widgets.QStyledItemDelegate.__init__(self, parent=parent)
 
     def createEditor(self, parent, option, index):
+        """Return a combobox populated with the choices appropriate for the cell's column."""
         column = index.column()
         if column >= 1 and column <= 4:
             model = index.model()
             export_item = model.itemFromIndex(index)._export_item()
 
             if column == COL_EXPORT_SIZE:
-                editor = widgets.QComboBox(parent)                
+                editor = widgets.QComboBox(parent)
                 for i, size in enumerate(mari.exports.resolutionList()):
                     if i == 0:
                         export_item_res = export_item.resolution()
@@ -450,6 +530,7 @@ class ExportItem_ItemDelegate(widgets.QStyledItemDelegate):
         return widgets.QStyledItemDelegate.createEditor(self, parent, option, index)
 
     def setEditorData(self, editor, index):
+        """Select the combobox entry matching the underlying export item's current value."""
         if isinstance(editor, widgets.QComboBox):
             column = index.column()
             if column >= 1 and column <= 4:
@@ -458,7 +539,7 @@ class ExportItem_ItemDelegate(widgets.QStyledItemDelegate):
 
                 model = index.model()
                 export_item = model.itemFromIndex(index)._export_item()
-                
+
                 if column == COL_EXPORT_SIZE:
                     current_value = export_item.resolution()
                 elif column == COL_EXPORT_COLOR_SPACE:
@@ -468,7 +549,7 @@ class ExportItem_ItemDelegate(widgets.QStyledItemDelegate):
                 elif column == COL_EXPORT_FORMAT:
                     file_name, file_ext = split_ext(export_item.fileTemplate())
                     current_value = file_ext
-                
+
                 for combo_box_index in range(editor.count()):
                     if editor.itemData(combo_box_index) == current_value:
                         current_index = combo_box_index
@@ -480,53 +561,62 @@ class ExportItem_ItemDelegate(widgets.QStyledItemDelegate):
         widgets.QStyledItemDelegate.setEditorData(self, editor, index)
 
     def setModelData(self, editor, model, index):
+        """Push the combobox's chosen value back to the underlying model item."""
         if isinstance(editor, widgets.QComboBox):
             column = index.column()
             if column >= 1 and column <= 4:
-                model.itemFromIndex(index).setData(editor.itemData(editor.currentIndex()), qt.UserRole)
+                model.itemFromIndex(index).setData(editor.itemData(editor.currentIndex()), core.Qt.UserRole)
                 return
 
         widgets.QStyledItemDelegate.setModelData(self, editor, model, index)
 
     def finishEdit(self):
+        """Commit and close the editor as soon as the user picks a new value."""
         editor = self.sender()
         if isinstance(editor, widgets.QComboBox):
             self.commitData.emit(editor)
-            self.closeEditor.emit(editor, self.NoHint)
+            self.closeEditor.emit(editor, widgets.QAbstractItemDelegate.NoHint)
+
 
 class ExportItem_Model(gui.QStandardItemModel):
-    def __init__(self, parent = None):
+    """Tree model: each top-level row is a shader, children are its exportable inputs."""
+
+    def __init__(self, parent=None):
+        """Initialise the model and its per-column override slots."""
         gui.QStandardItemModel.__init__(self, parent)
-        
+
         self.export_overrides = [None]*5
 
     def parentObject(self):
+        """Return the QObject parent set on this model."""
         return core.QObject.parent(self)
 
     def override(self, index):
+        """Return the active per-column override value, or ``None`` if no override is set."""
         return self.export_overrides[index]
 
     def setOverride(self, index, value):
+        """Set the per-column override ``value`` (or ``None`` to clear)."""
         self.export_overrides[index] = value
 
     def update_shader_items(self, new_shader_list):
+        """Synchronise the top-level rows with ``new_shader_list`` and return any added items."""
         added_rows = []
         if len(new_shader_list) == 0:
             self.clear()
-        else:        
+        else:
             for old_row in range(self.rowCount()-1, -1, -1):
                 shader_item = self.item(old_row, COL_EXPORT_SHADER)
                 if shader_item:
-                    shader = shader_item.data(qt.UserRole)
+                    shader = shader_item.data(core.Qt.UserRole)
                     if shader not in new_shader_list:
-                        row_items = self.takeRow(old_row)
-                        del row_items
-            
+                        self.takeRow(old_row)
+
             for new_row, new_shader in enumerate(new_shader_list):
                 for old_row in range(self.rowCount()):
                     shader_item = self.item(old_row, COL_EXPORT_SHADER)
                     if shader_item:
-                        shader = shader_item.data(qt.UserRole)
+                        shader = shader_item.data(core.Qt.UserRole)
                         if shader == new_shader:
                             if new_row != old_row:
                                 self.insertRow(new_row, self.takeRow(old_row))
@@ -539,11 +629,12 @@ class ExportItem_Model(gui.QStandardItemModel):
         return added_rows
 
     def advancedInputList(shader):
+        """Return ``(input_name, input_node, display_name)`` triples for ``shader``'s exportable inputs."""
         result = []
         shader_model = shader.shaderModel()
         if not shader_model:
             return result
-        
+
         shader_node = shader.shaderNode()
         if not shader_node:
             return result
@@ -568,38 +659,37 @@ class ExportItem_Model(gui.QStandardItemModel):
                     result.append((input_name, input_node, shader_model_input_name))
                 elif isinstance(input_node, mari.BakePointNode):
                     result.append((input_name, input_node, shader_model_input_name))
-        
+
         return result
 
     def updateShaderInputs(self, shader_item):
+        """Rebuild ``shader_item``'s child rows to match its shader's current exportable inputs."""
         new_shader_input_infos = []
         shader_input_set = set()
-        node_to_export_item = {}
-        
-        shader = shader_item.data(qt.UserRole)
-        if shader:            
+
+        shader = shader_item.data(core.Qt.UserRole)
+        if shader:
             new_shader_input_infos = ExportItem_Model.advancedInputList(shader)
             for input_name, shader_input, shader_input_name in new_shader_input_infos:
                 shader_input_set.add(shader_input)
-        
+
         if len(new_shader_input_infos) == 0:
             row_count = shader_item.rowCount()
             if row_count > 0:
                 shader_item.removeRows(0, row_count)
             shader_item.insertRow(0, [gui.QStandardItem("No Channels to Export"),])
             return
-        
+
         for old_row in range(shader_item.rowCount()-1, -1, -1):
             child = shader_item.child(old_row, COL_EXPORT_SHADER_INPUT_NODE)
-            if child and child.data(qt.UserRole) not in shader_input_set:
-                row_items = shader_item.takeRow(old_row)
-                del row_items
-        
+            if child and child.data(core.Qt.UserRole) not in shader_input_set:
+                shader_item.takeRow(old_row)
+
         for new_row, shader_input_info in enumerate(new_shader_input_infos):
             input_name, shader_input, shader_input_name = shader_input_info
             for old_row in range(shader_item.rowCount()):
                 child = shader_item.child(old_row, COL_EXPORT_SHADER_INPUT_NODE)
-                if child and child.data(qt.UserRole) == shader_input:
+                if child and child.data(core.Qt.UserRole) == shader_input:
                     if new_row != old_row:
                         shader_item.insertRow(new_row, shader_item.takeRow(old_row))
                     break
@@ -609,14 +699,17 @@ class ExportItem_Model(gui.QStandardItemModel):
                 colorspace_item = ExportItem_SettingsItem()
                 depth_item = ExportItem_SettingsItem()
                 file_options = ExportItem_SettingsItem()
-                
-                shader_item.insertRow(new_row, [shader_input_item, size_item, colorspace_item, depth_item, file_options])
+
+                shader_item.insertRow(new_row, [
+                    shader_input_item, size_item, colorspace_item, depth_item, file_options
+                ])
 
         self.update_export_items(shader_item)
 
-    def update_export_items(self, shader_item, geo_entity = None):
+    def update_export_items(self, shader_item, geo_entity=None):
+        """Refresh every export item under ``shader_item``, resolving ``geo_entity`` if not given."""
         if geo_entity is None:
-            shader = shader_item.data(qt.UserRole)
+            shader = shader_item.data(core.Qt.UserRole)
             if shader:
                 node = shader.shaderNode()
                 if node:
@@ -627,9 +720,10 @@ class ExportItem_Model(gui.QStandardItemModel):
         for row in range(shader_item.rowCount()):
             self.update_child_export_item(shader_item, row, geo_entity)
 
-    def update_child_export_item(self, shader_item, row, geo_entity = None):
+    def update_child_export_item(self, shader_item, row, geo_entity=None):
+        """Refresh the export item stored on a single child ``row`` of ``shader_item``."""
         if geo_entity is None:
-            shader = shader_item.data(qt.UserRole)
+            shader = shader_item.data(core.Qt.UserRole)
             if shader:
                 node = shader.shaderNode()
                 if node:
@@ -638,12 +732,13 @@ class ExportItem_Model(gui.QStandardItemModel):
                 return
 
         shader_input_item = shader_item.child(row, COL_EXPORT_SHADER_INPUT_NODE)
-        
+
         self.update_export_item(shader_input_item, geo_entity)
-        
-    def update_export_item(self, shader_input_item, geo_entity = None):
+
+    def update_export_item(self, shader_input_item, geo_entity=None):
+        """Attach (or create) the Mari export item backing ``shader_input_item``."""
         if geo_entity is None:
-            shader_input_node = shader_input_item.data(qt.UserRole)
+            shader_input_node = shader_input_item.data(core.Qt.UserRole)
             if shader_input_node:
                 parent_graph = shader_input_node.parentNodeGraph()
                 if parent_graph:
@@ -652,13 +747,13 @@ class ExportItem_Model(gui.QStandardItemModel):
                 return
 
         if shader_input_item:
-            shader_input_node_export_item = shader_input_item.data(qt.UserRole+1)
+            shader_input_node_export_item = shader_input_item.data(core.Qt.UserRole+1)
             if shader_input_node_export_item is None:
-                shader_input_node = shader_input_item.data(qt.UserRole)
+                shader_input_node = shader_input_item.data(core.Qt.UserRole)
                 if shader_input_node:
                     for export_item in mari.exports.exportItemList(geo_entity):
                         if export_item and export_item.sourceNode() == shader_input_node:
-                            shader_input_item.setData(export_item, qt.UserRole+1)
+                            shader_input_item.setData(export_item, core.Qt.UserRole+1)
                             break
                     else:
                         # Create new export item if required.
@@ -668,9 +763,10 @@ class ExportItem_Model(gui.QStandardItemModel):
                             shader_input_node_export_item.setFileTemplate(self.parentObject().default_texture_pattern)
                             shader_input_node_export_item.setMetadata("_HIDDEN", True)
                             mari.exports.addExportItem(shader_input_node_export_item, geo_entity)
-                            shader_input_item.setData(shader_input_node_export_item, qt.UserRole+1)
+                            shader_input_item.setData(shader_input_node_export_item, core.Qt.UserRole+1)
 
     def update_column(self, column):
+        """Emit ``dataChanged`` for every cell in ``column`` so the view re-reads values."""
         for row in range(self.rowCount()):
             shader_item = self.item(row, 0)
             if shader_item:
@@ -680,37 +776,41 @@ class ExportItem_Model(gui.QStandardItemModel):
                         child.emitDataChanged()
 
     def update_texture_pattern(self, file_template):
+        """Apply ``file_template`` to every export item and refresh the format column."""
         for row in range(self.rowCount()):
             shader_item = self.item(row, COL_EXPORT_SHADER)
             for child_row in range(shader_item.rowCount()):
                 shader_input_item = shader_item.child(child_row, COL_EXPORT_SHADER_INPUT_NODE)
                 file_ext_item = shader_item.child(child_row, COL_EXPORT_FORMAT)
-                export_item = shader_input_item.data(qt.UserRole + 1)
+                export_item = shader_input_item.data(core.Qt.UserRole + 1)
                 export_item.setFileTemplate(file_template)
                 file_ext_item.emitDataChanged()
 
-    def flags(self, index = core.QModelIndex()):
+    def flags(self, index=core.QModelIndex()):
+        """Mark child setting cells editable unless an override is active for that column."""
         flags = gui.QStandardItemModel.flags(self, index)
-        
+
         column = index.column()
         valid_parent = index.parent().isValid()
         if valid_parent and column == COL_EXPORT_SHADER:
-            flags = flags |  qt.ItemIsUserCheckable
-            flags = flags & ~qt.ItemIsEditable
+            flags = flags | core.Qt.ItemIsUserCheckable
+            flags = flags & ~core.Qt.ItemIsEditable
         else:
             if valid_parent and self.override(column) is None:
-                flags = flags |  qt.ItemIsEditable
+                flags = flags | core.Qt.ItemIsEditable
             else:
-                flags = flags & ~qt.ItemIsEditable
-            flags = flags & ~qt.ItemIsUserCheckable
+                flags = flags & ~core.Qt.ItemIsEditable
+            flags = flags & ~core.Qt.ItemIsUserCheckable
         return flags
-        
-    def columnCount(self, index = core.QModelIndex()):
+
+    def columnCount(self, index=core.QModelIndex()):
+        """Return the fixed column count (shader + four setting columns)."""
         return 5
 
     def headerData(self, section, orientation, role):
-        if orientation == qt.Horizontal:
-            if role == qt.DisplayRole:
+        """Provide the centred horizontal column headers for the export tree."""
+        if orientation == core.Qt.Horizontal:
+            if role == core.Qt.DisplayRole:
                 if section == COL_EXPORT_SHADER or section == COL_EXPORT_SHADER_INPUT_NODE:
                     return "Shader / Export Item"
                 elif section == COL_EXPORT_SIZE:
@@ -721,67 +821,80 @@ class ExportItem_Model(gui.QStandardItemModel):
                     return "Depth"
                 elif section == COL_EXPORT_FORMAT:
                     return "Format"
-            elif role == qt.TextAlignmentRole:
-                return qt.AlignHCenter
+            elif role == core.Qt.TextAlignmentRole:
+                return core.Qt.AlignHCenter
         return None
 
     def data(self, index, role):
-        if role == qt.ForegroundRole:
+        """Tint cells whose column has an active override using a distinct fore/background colour."""
+        if role == core.Qt.ForegroundRole:
             if index.parent().isValid():
                 if self.override(index.column()) is not None:
                     return gui.QColor(50, 50, 50)
-        if role == qt.BackgroundRole:
+        if role == core.Qt.BackgroundRole:
             if index.parent().isValid():
                 if self.override(index.column()) is not None:
                     return gui.QColor(200, 157, 0)
         return gui.QStandardItemModel.data(self, index, role)
 
     def get_items_for_export(self):
+        """Return a ``{shader: [(export_item, input_name), ...]}`` map of enabled exports."""
         for_export = {}
-        export_item_to_shader_input_name = {}
         for row in range(self.rowCount()):
             shader_item = self.item(row, COL_EXPORT_SHADER)
-            shader = shader_item.data(qt.UserRole)
+            shader = shader_item.data(core.Qt.UserRole)
             if shader:
                 export_items = []
                 for child_row in range(shader_item.rowCount()):
                     shader_input_item = shader_item.child(child_row, COL_EXPORT_SHADER_INPUT_NODE)
-                    export_item = shader_input_item.data(qt.UserRole+1)
-                    shader_input_name = shader_input_item.data(qt.UserRole+2)
+                    export_item = shader_input_item.data(core.Qt.UserRole+1)
+                    shader_input_name = shader_input_item.data(core.Qt.UserRole+2)
                     if export_item and export_item.exportEnabled():
                         export_items.append((export_item, shader_input_name))
-                
+
                 if len(export_items) > 0:
                     for_export[shader] = export_items
 
         return for_export
 
+
 class ExportItem_View(widgets.QTreeView):
-    def __init__(self, parent = None):
-        widgets.QTreeView.__init__(self, parent = parent)
+    """Tree view paired with :class:`ExportItem_Model` to display the per-shader export tree."""
+
+    def __init__(self, parent=None):
+        """Configure stretching headers, uniform row heights and intuitive edit triggers."""
+        widgets.QTreeView.__init__(self, parent=parent)
         self.header().setSectionResizeMode(widgets.QHeaderView.Stretch)
         self.setUniformRowHeights(True)
-        self.setEditTriggers(widgets.QAbstractItemView.CurrentChanged | widgets.QAbstractItemView.SelectedClicked | widgets.QAbstractItemView.DoubleClicked)
+        self.setEditTriggers(
+            widgets.QAbstractItemView.CurrentChanged |
+            widgets.QAbstractItemView.SelectedClicked |
+            widgets.QAbstractItemView.DoubleClicked
+        )
+
 
 # ==============================================================================
 # Main Widget
 # ==============================================================================
 
 class FileBrowseWidget(widgets.QWidget):
+    """Combobox + browse-button compound widget that remembers a history of file paths."""
+
     pathChanged = core.Signal(str)
-    
-    def __init__(self, parent = None, type = widgets.QFileDialog.AnyFile, filters = "", history = [], show_browse_button = True):
+
+    def __init__(self, parent=None, type=widgets.QFileDialog.AnyFile, filters="", history=[], show_browse_button=True):
+        """Build the widget, prefill the combobox from ``history`` and wire the editing signals."""
         widgets.QWidget.__init__(self, parent)
         self.history = history
         self.type = type
         self.filters = filters
-        
-        self.file_system_model = widgets.QFileSystemModel()
+
+        self.file_system_model = widgets.QFileSystemModel(self)
         self.file_system_model.setRootPath(core.QDir.rootPath())
         self.completer = widgets.QCompleter()
         self.completer.setModel(self.file_system_model)
         self.completer.setCompletionMode(widgets.QCompleter.PopupCompletion)
-        
+
         layout = widgets.QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         self.combo_box = widgets.QComboBox()
@@ -799,30 +912,35 @@ class FileBrowseWidget(widgets.QWidget):
             self.browse_button = widgets.QPushButton("...")
             self.browse_button.setMaximumSize(32, 32)
             layout.addWidget(self.browse_button)
-        
+
         self.setLayout(layout)
-        
+
         mari.utils.connect(self.combo_box.lineEdit().editingFinished, self.on_combo_box_editing_finished)
         mari.utils.connect(self.combo_box.currentIndexChanged, self.on_combo_box_index_changed)
 
         if show_browse_button:
             mari.utils.connect(self.browse_button.pressed, self.browse)
-        
+
     def path(self):
+        """Return the most recently used path, or an empty string when none is recorded."""
         if len(self.history) > 0:
             return self.history[0]
         return ""
-        
+
     def paths(self):
+        """Return the full path history list (most recent first)."""
         return self.history
-        
+
     def browse(self):
+        """Open a Qt file dialog appropriate for ``self.type`` and adopt the chosen path."""
         if self.type == widgets.QFileDialog.Directory:
             new_path = mari.utils.misc.getExistingDirectory(self, "Select Directory", self.path())
         elif self.type == widgets.QFileDialog.ExistingFile:
             new_path = mari.utils.misc.getOpenFileName(self, "Select File", self.path(), self.filters)
         else:
-            new_path = mari.utils.misc.getSaveFileName(self, "Select File", self.path(), self.filters, save_filename=self.path())
+            new_path = mari.utils.misc.getSaveFileName(
+                self, "Select File", self.path(), self.filters, save_filename=self.path()
+            )
 
         if len(new_path) == 0:
             return
@@ -830,18 +948,21 @@ class FileBrowseWidget(widgets.QWidget):
         self.new_path_added(new_path)
 
     def on_combo_box_editing_finished(self):
+        """Handle the user pressing Enter in the combobox line edit."""
         if self.adding_paths:
             return
 
         self.new_path_added(self.combo_box.lineEdit().text())
 
     def on_combo_box_index_changed(self, index):
+        """Handle the user picking a previously used path from the combobox dropdown."""
         if self.adding_paths:
             return
 
         self.new_path_added(self.combo_box.itemText(index))
 
     def new_path_added(self, new_path):
+        """Promote ``new_path`` to the top of the history and emit :attr:`pathChanged`."""
         if len(new_path) == 0:
             return
         new_path = os.path.normpath(new_path)
@@ -854,26 +975,30 @@ class FileBrowseWidget(widgets.QWidget):
             self.history.insert(0, new_path)
         else:
             self.history.insert(0, self.history.pop(index))
-        
+
         self.adding_paths = True
         self.combo_box.clear()
         self.combo_box.addItems(self.history)
         self.combo_box.setCurrentIndex(0)
         self.adding_paths = False
-        
+
         if old_path != new_path:
             self.pathChanged.emit(new_path)
 
+
 class USDExportWidget(widgets.QWidget):
-    def __init__(self, parent = None):
+    """Main widget for the *USD Export* tab; assembles the views, options and export action."""
+
+    def __init__(self, parent=None):
+        """Build the widget tree, restore persisted paths and wire all signal/slot connections."""
         widgets.QWidget.__init__(self, parent)
 
         main_layout = widgets.QVBoxLayout()
         self.setLayout(main_layout)
         main_layout.setContentsMargins(3, 3, 3, 3)
 
-        shader_export_item_layout = widgets.QSplitter(qt.Vertical)
-        
+        shader_export_item_layout = widgets.QSplitter(core.Qt.Vertical)
+
         self.default_size = mari.exports.resolutionList()[1]
         self.default_color_space = mari.exports.colorspaceList()[1]
         self.default_depth = mari.exports.depthList()[1]
@@ -892,7 +1017,7 @@ class USDExportWidget(widgets.QWidget):
         self.export_item_view.setModel(self.export_item_model)
         self.export_item_view.setItemDelegate(ExportItem_ItemDelegate(parent=self))
         shader_export_item_layout.addWidget(self.export_item_view)
-        
+
         main_layout.addWidget(shader_export_item_layout)
 
         # USD Export Options
@@ -905,96 +1030,118 @@ class USDExportWidget(widgets.QWidget):
         for index, stretch in enumerate((10, 20, 10, 20)):
             options_layout.setColumnStretch(index, stretch)
 
-        self.export_usd_target_dir_widget = FileBrowseWidget(self, widgets.QFileDialog.Directory, "", USDExportWidget.load_usd_target_dir_paths())
+        self.export_usd_target_dir_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.Directory, "", USDExportWidget.load_usd_target_dir_paths()
+        )
         target_dir_label = widgets.QLabel("Texture Target Directory", self)
-        target_dir_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        target_dir_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(target_dir_label, 0, 0)
         options_layout.addWidget(self.export_usd_target_dir_widget, 0, 1)
-        
+
         self.default_depth_combo_box = widgets.QComboBox(self)
         self.default_depth_combo_box.setSizePolicy(widgets.QSizePolicy.Expanding, widgets.QSizePolicy.Fixed)
         self.default_depth_combo_box.addItem("No Override", None)
-        self.default_depth_combo_box.setToolTip("Overrides the bit depth of exported export items.\nWill not change export item until Export is triggered, will not change export items which are not exported.")
+        self.default_depth_combo_box.setToolTip(
+            "Overrides the bit depth of exported export items.\n"
+            "Will not change export item until Export is triggered, "
+            "will not change export items which are not exported."
+        )
         for depth in mari.exports.depthList():
             self.default_depth_combo_box.addItem(depth, depth)
         override_depth_label = widgets.QLabel("Override Depth", self)
-        override_depth_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        override_depth_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(override_depth_label, 0, 2)
         options_layout.addWidget(self.default_depth_combo_box, 0, 3)
-        
+
         image_filter = "Images (" + " ".join(["*.%s" % ext for ext in mari.exports.imageFileExtensionList()]) + ")"
-        self.export_texture_file_widget = FileBrowseWidget(self, widgets.QFileDialog.AnyFile, image_filter, USDExportWidget.load_usd_texture_file_paths(self.default_texture_pattern), False)
+        self.export_texture_file_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.AnyFile, image_filter,
+            USDExportWidget.load_usd_texture_file_paths(self.default_texture_pattern), False
+        )
         export_texture_file_label = widgets.QLabel("Texture File Name", self)
-        export_texture_file_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        export_texture_file_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(export_texture_file_label, 1, 0)
         options_layout.addWidget(self.export_texture_file_widget, 1, 1)
-        
+
         self.default_size_combo_box = widgets.QComboBox(self)
         self.default_size_combo_box.setSizePolicy(widgets.QSizePolicy.Expanding, widgets.QSizePolicy.Fixed)
         self.default_size_combo_box.addItem("No Override", None)
-        self.default_size_combo_box.setToolTip("Overrides the resolution of exported export items.\nWill not change export item until Export is triggered, will not change export items which are not exported.")
+        self.default_size_combo_box.setToolTip(
+            "Overrides the resolution of exported export items.\n"
+            "Will not change export item until Export is triggered, "
+            "will not change export items which are not exported."
+        )
         for size in mari.exports.resolutionList():
             self.default_size_combo_box.addItem(size, size)
         override_resolution_label = widgets.QLabel("Override Resolution", self)
-        override_resolution_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        override_resolution_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(override_resolution_label, 1, 2)
         options_layout.addWidget(self.default_size_combo_box, 1, 3)
-        
+
         look_file_filter = "USD Look File (*.usd *.usda *.usdz)"
-        self.look_file_widget = FileBrowseWidget(self, widgets.QFileDialog.AnyFile, look_file_filter, USDExportWidget.load_usd_look_file_paths())
+        self.look_file_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.AnyFile, look_file_filter, USDExportWidget.load_usd_look_file_paths()
+        )
         look_file_label = widgets.QLabel("USD Look File", self)
-        look_file_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        look_file_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(look_file_label, 2, 0)
         options_layout.addWidget(self.look_file_widget, 2, 1)
-        
+
         self.root_name_widget = widgets.QLineEdit(self)
         self.root_name_widget.setText(USDExportWidget.load_text_value("UsdRootName", "/root"))
         root_name_label = widgets.QLabel("Root Name", self)
-        root_name_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        root_name_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(root_name_label, 2, 2)
         options_layout.addWidget(self.root_name_widget, 2, 3)
 
         self.uv_set_name_widget = widgets.QLineEdit(self)
         self.uv_set_name_widget.setText(USDExportWidget.load_text_value("UsdUvSetName", "st"))
         uv_set_name_label = widgets.QLabel("UV Set Name", self)
-        uv_set_name_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        uv_set_name_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(uv_set_name_label, 3, 2)
         options_layout.addWidget(self.uv_set_name_widget, 3, 3)
-        
+
         assembly_file_filter = "USD Assembly File (*.usd *.usda *.usdz)"
-        self.assembly_file_widget = FileBrowseWidget(self, widgets.QFileDialog.AnyFile, assembly_file_filter, USDExportWidget.load_usd_assembly_file_paths())
-        assembly_file_label= widgets.QLabel("USD Assembly File", self)
-        assembly_file_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        self.assembly_file_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.AnyFile, assembly_file_filter, USDExportWidget.load_usd_assembly_file_paths()
+        )
+        assembly_file_label = widgets.QLabel("USD Assembly File", self)
+        assembly_file_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(assembly_file_label, 3, 0)
         options_layout.addWidget(self.assembly_file_widget, 3, 1)
-        
+
         payload_file_filter = "USD (*.usd *.usda *.usdz)"
-        self.payload_file_widget = FileBrowseWidget(self, widgets.QFileDialog.ExistingFile, payload_file_filter, USDExportWidget.load_usd_payload_file_paths())
+        self.payload_file_widget = FileBrowseWidget(
+            self, widgets.QFileDialog.ExistingFile, payload_file_filter, USDExportWidget.load_usd_payload_file_paths()
+        )
         payload_label = widgets.QLabel("USD Payload", self)
-        payload_label.setAlignment(qt.AlignRight | qt.AlignVCenter)
+        payload_label.setAlignment(core.Qt.AlignRight | core.Qt.AlignVCenter)
         options_layout.addWidget(payload_label, 4, 0)
         options_layout.addWidget(self.payload_file_widget, 4, 1)
-        
+
         main_layout.addWidget(options_group_box)
-        
+
         export_layout = widgets.QHBoxLayout()
         self.export_button = widgets.QPushButton("Export to USD")
         export_layout.addWidget(self.export_button)
         main_layout.addLayout(export_layout)
         for index, stretch in enumerate((20, 10, 5)):
             main_layout.setStretch(index, stretch)
-        
+
         self.export_item_view.expandAll()
         self.on_shader_assignment_changed(None)
-        
+
         mari.utils.connect(self.shader_assignment_model.itemChanged, self.on_shader_assignment_changed)
         mari.utils.connect(self.default_depth_combo_box.currentIndexChanged, self.on_default_depth_combo_box_changed)
-        mari.utils.connect(self.export_texture_file_widget.pathChanged, self.on_export_texture_file_name_widget_path_changed)
+        mari.utils.connect(
+            self.export_texture_file_widget.pathChanged, self.on_export_texture_file_name_widget_path_changed
+        )
         mari.utils.connect(self.default_size_combo_box.currentIndexChanged, self.on_default_size_combo_box_changed)
         mari.utils.connect(self.export_button.pressed, self.on_export_button_pressed)
 
     @staticmethod
     def load_paths(name, default_path):
+        """Load the ``name`` path history (project metadata + user settings), seeded with ``default_path``."""
         # Pull the path history from the settings.
         settings = mari.Settings()
         paths = []
@@ -1003,7 +1150,9 @@ class USDExportWidget(widgets.QWidget):
             mari.app.log("USD Export: Settings has value for {0}: {1}".format(name, settings_paths))
             paths.append(settings_paths)
         elif isinstance(settings_paths, list):
-            mari.app.log("USD Export: Settings has values for {0}:\n    {1}".format(name, "\n    ".join(settings_paths)))
+            mari.app.log(
+                "USD Export: Settings has values for {0}:\n    {1}".format(name, "\n    ".join(settings_paths))
+            )
             paths = settings_paths
         paths = [os.path.normpath(path) for path in paths]
 
@@ -1032,8 +1181,7 @@ class USDExportWidget(widgets.QWidget):
 
     @staticmethod
     def load_text_value(name, default_value):
-        """ Attempts to load a text value from the project metadata, then the user settings and
-        finally uses the given default value.
+        """Load a text setting from project metadata or user settings, falling back to ``default_value``.
 
         Args:
             name (str): Name of property
@@ -1059,36 +1207,44 @@ class USDExportWidget(widgets.QWidget):
 
     @staticmethod
     def load_usd_target_dir_paths():
+        """Return the persisted texture target directory history."""
         default = mari.resources.path("MARI_DEFAULT_EXPORT_PATH")
         return USDExportWidget.load_paths("UsdTargetDirPaths", default)
 
     @staticmethod
     def load_usd_texture_file_paths(default_texture_pattern):
+        """Return the persisted texture file-name pattern history."""
         default = os.path.join(mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), default_texture_pattern)
         return USDExportWidget.load_paths("UsdTexturePaths", default)
 
     @staticmethod
     def load_usd_look_file_paths():
+        """Return the persisted USD look-file path history."""
         default = os.path.join(mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "Look File.usda")
         return USDExportWidget.load_paths("UsdLookPaths", default)
-        
+
     @staticmethod
     def load_usd_assembly_file_paths():
+        """Return the persisted USD assembly-file path history."""
         default = os.path.join(mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "Assembly.usda")
         return USDExportWidget.load_paths("UsdAssemblyPaths", default)
 
     @staticmethod
     def load_usd_payload_file_paths():
+        """Return the persisted USD payload-file path history."""
         default = os.path.join(mari.resources.path("MARI_DEFAULT_EXPORT_PATH"), "Payload.usd")
         return USDExportWidget.load_paths("UsdPayloadPaths", default)
 
     def on_default_depth_combo_box_changed(self, text):
+        """Forward the depth-override combobox change to :meth:`on_default_depth_changed`."""
         self.on_default_depth_changed(text)
 
     def on_default_size_combo_box_changed(self, text):
+        """Forward the size-override combobox change to :meth:`on_default_size_changed`."""
         self.on_default_size_changed(text)
 
     def on_export_texture_file_name_widget_path_changed(self, path):
+        """Update the default texture pattern and re-template every export item."""
         file_name, file_ext = split_ext(path)
         self.default_format = file_ext
         self.default_texture_pattern = path
@@ -1104,16 +1260,19 @@ class USDExportWidget(widgets.QWidget):
         self.export_item_model.update_texture_pattern(file_template)
 
     def on_export_texture_file_name_browse_button_pressed(self):
+        """Reserved hook for the texture file browse button (currently a no-op)."""
         pass
 
     def on_default_size_changed(self, index):
+        """Store the chosen size override and refresh the size column."""
         editor = self.sender()
         if isinstance(editor, widgets.QComboBox):
             size = editor.itemData(index)
             self.export_item_model.setOverride(COL_EXPORT_SIZE, size)
             self.export_item_model.update_column(COL_EXPORT_SIZE)
-        
+
     def on_default_depth_changed(self, index):
+        """Store the chosen depth override and refresh the depth column."""
         editor = self.sender()
         if isinstance(editor, widgets.QComboBox):
             depth = editor.itemData(index)
@@ -1121,21 +1280,25 @@ class USDExportWidget(widgets.QWidget):
             self.export_item_model.update_column(COL_EXPORT_DEPTH)
 
     def on_shader_assignment_changed(self, item):
+        """Sync the export tree to the currently checked shader assignments and expand new rows."""
         selected_shaders = self.shader_assignment_model.selected_shaders()
         new_rows = self.export_item_model.update_shader_items(selected_shaders)
         for new_row in new_rows:
             self.export_item_view.expand(new_row.index())
 
     def on_export_button_pressed(self):
+        """Validate, configure and run the USD export for every enabled shader/export item."""
         for_export = self.export_item_model.get_items_for_export()
-        
+
         if len(for_export) == 0:
             return
-        
+
         # Verify file formats are valid for bit depths
         formats_for_bit_depth = {}
-        for bit_depth in (mari.Image.DEPTH_BYTE, mari.Image.DEPTH_HALF, mari.Image.DEPTH_FLOAT):
-            formats_for_bit_depth[int(bit_depth)] = mari.images.supportedWriteFormats(mari.Image.depthAsInternalFormat(bit_depth))
+        for bit_depth in (mari.Image.Depth.DEPTH_BYTE, mari.Image.Depth.DEPTH_HALF, mari.Image.Depth.DEPTH_FLOAT):
+            formats_for_bit_depth[int(bit_depth)] = mari.images.supportedWriteFormats(
+                mari.Image.depthAsInternalFormat(bit_depth)
+            )
 
         depths = mari.exports.depthList()
 
@@ -1146,7 +1309,7 @@ class USDExportWidget(widgets.QWidget):
                     export_item_depth = export_item.depth()
                 else:
                     export_item_depth = override_depth
-                
+
                 try:
                     power = depths.index(export_item_depth)
                 except ValueError:
@@ -1156,11 +1319,11 @@ class USDExportWidget(widgets.QWidget):
                         export_depth = int(export_item.sourceDepth())
                     else:
                         export_depth = 8 * (2**(power-1))
-            
+
                 if export_depth is None:
                     print("Export bit depth is invalid")
                     return
-                
+
                 export_file_name, export_file_ext = split_ext(export_item.fileTemplate())
                 if export_file_ext not in formats_for_bit_depth.get(export_depth, []):
                     print("File format %s not valid for bit depth %s" % (export_file_ext, export_depth))
@@ -1213,23 +1376,23 @@ class USDExportWidget(widgets.QWidget):
         for shader, export_items in for_export.items():
             if not shader:
                 continue
-                
+
             node = shader.shaderNode()
             if not node:
                 continue
-            
+
             shader_model = shader.shaderModel()
             if not shader_model:
                 continue
-            
+
             node_graph = node.parentNodeGraph()
             if not node_graph:
                 continue
-                
+
             geo_entity = node_graph.parentGeoEntity()
             if not geo_entity:
                 continue
-                
+
             current_geo_version = geo_entity.currentVersion()
             if not current_geo_version:
                 continue
@@ -1255,6 +1418,7 @@ class USDExportWidget(widgets.QWidget):
 
     @staticmethod
     def save_paths(name, values):
+        """Persist ``values`` (top entry to project metadata, history to user settings)."""
         # Save the current entry with the project.
         project = mari.projects.current()
         if project:
@@ -1267,25 +1431,30 @@ class USDExportWidget(widgets.QWidget):
         # Save the history with the settings.
         settings = mari.Settings()
         settings.setValue("UsdExportDialog/%s" % name, values[:10])
-        
+
     def save_usd_target_dir_paths(self):
+        """Persist the texture target directory history."""
         self.save_paths("UsdTargetDirPaths", self.export_usd_target_dir_widget.paths())
 
     def save_usd_texture_file_paths(self):
+        """Persist the texture file-name pattern history."""
         self.save_paths("UsdTexturePaths", self.export_texture_file_widget.paths())
 
     def save_usd_look_file_paths(self):
+        """Persist the USD look-file path history."""
         self.save_paths("UsdLookPaths", self.look_file_widget.paths())
-        
+
     def save_usd_assembly_file_paths(self):
+        """Persist the USD assembly-file path history."""
         self.save_paths("UsdAssemblyPaths", self.assembly_file_widget.paths())
 
     def save_usd_payload_file_paths(self):
+        """Persist the USD payload-file path history."""
         self.save_paths("UsdPayloadPaths", self.payload_file_widget.paths())
 
     @staticmethod
     def save_text_value(name, text):
-        """ Saves text value to the project metadata and the user settings using the given property name.
+        """Save text value to the project metadata and the user settings using the given property name.
 
         Args:
             name (str): Name of property
@@ -1302,9 +1471,11 @@ class USDExportWidget(widgets.QWidget):
         settings.setValue("UsdExportDialog/%s" % name, text)
 
     def onCloseTab(self):
+        """Persist all dialog state when the host tab is closed."""
         self.saveSettings()
 
     def saveSettings(self):
+        """Persist every path history and free-text option to project metadata and user settings."""
         self.save_usd_target_dir_paths()
         self.save_usd_texture_file_paths()
         self.save_usd_look_file_paths()
@@ -1313,15 +1484,19 @@ class USDExportWidget(widgets.QWidget):
         self.save_text_value("UsdRootName", self.root_name_widget.text())
         self.save_text_value("UsdUvSetName", self.uv_set_name_widget.text())
 
+
 def generate_usd_export_widget():
+    """Create and return a new :class:`USDExportWidget` instance for the legacy export tab."""
     return USDExportWidget()
 
+
 # This legacy tab is disabled by default, but it can be enabled by the MARI_USD_LEGACY_EXPORT_TAB environment variable
-if mari.app.isRunning() and "MARI_USD_LEGACY_EXPORT_TAB" in os.environ and int(os.environ["MARI_USD_LEGACY_EXPORT_TAB"])==1:
+if (mari.app.isRunning() and "MARI_USD_LEGACY_EXPORT_TAB" in os.environ and
+        int(os.environ["MARI_USD_LEGACY_EXPORT_TAB"]) == 1):
     # Register the USD Export tab to the Export Manager
     try:
         mari.system.batch_export_dialog.deregisterCustomTabWidgetCallback("USD Export")
     except ValueError:
         pass
-    
+
     mari.system.batch_export_dialog.registerCustomTabWidgetCallback("USD Export", generate_usd_export_widget)

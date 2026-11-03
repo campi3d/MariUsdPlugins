@@ -41,9 +41,13 @@
 #include "pxr/usd/usdGeom/subset.h"
 #include "pxr/usd/usdShade/materialBindingAPI.h"
 #include "pxr/usd/usdShade/tokens.h"
+#include "pxr/usd/sdf/path.h"
+#include "pxr/usd/sdf/payload.h"
+#include "pxr/usd/sdf/reference.h"
 
+#include <algorithm>
 #include <float.h>
-using namespace std;
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 TF_DEFINE_ENV_SETTING(MARI_READ_FLOAT2_AS_UV, true,
@@ -54,9 +58,6 @@ std::vector<std::string> GeoData::_ignoreGeomPathSubstring;
 
 std::string GeoData::_requireGeomPathSubstringEnvVar = "PX_USDREADER_REQUIRE_GEOM_PATH_SUBSTR";
 std::string GeoData::_ignoreGeomPathSubstringEnvVar = "PX_USDREADER_IGNORE_GEOM_PATH_SUBSTR";
-
-//#define PRINT_DEBUG
-//#define PRINT_ARRAYS
 
 //------------------------------------------------------------------------------
 // GeoData implementation
@@ -77,8 +78,9 @@ GeoData::GeoData(UsdPrim const &prim,
                  bool readerIsUpY,
                  bool keepCentered,
                  UsdPrim const &model,
-                 const MriGeoReaderHost& host,
-                 std::vector<std::string>& log)
+                 const PluginHosts* pluginHosts,
+                 std::vector<std::string>& log,
+                 bool rightHandedWindingOrder)
 {
     // Init
     m_isSubdivMesh = false;
@@ -87,32 +89,29 @@ GeoData::GeoData(UsdPrim const &prim,
     m_faceVaryingLinearInterpolation = 0;
     m_propagateCorner = 0;
     m_triangleSubdivision = 0;
+    m_isRightHandWindingOrder = rightHandedWindingOrder;
 
     UsdGeomMesh mesh(prim);
-    if (not mesh)
+    if (!mesh)
     {
-        host.trace("[GeoData:%d] Invalid non-mesh prim %s (type %s)", __LINE__, prim.GetPath().GetText(), prim.GetTypeName().GetText());
+        pluginHosts->geoReaderHost.trace("[GeoData:%d] Invalid non-mesh prim %s (type %s)", __LINE__, prim.GetPath().GetText(), prim.GetTypeName().GetText());
         log.push_back("** Invalid non-mesh prim " + std::string(prim.GetPath().GetText()) + " of type " + std::string(prim.GetTypeName().GetText()));
         return;
     }
 
     bool isTopologyVarying = mesh.GetFaceVertexIndicesAttr().GetNumTimeSamples() >= 1;
 
-#if defined(PRINT_DEBUG)
-    host.trace("[ !! ] ---------------------------------------");
-    host.trace("[ GeoData:%d] Reading MESH %s (type %s) (topology Varying %d)", __LINE__, prim.GetPath().GetText(), prim.GetTypeName().GetText(), isTopologyVarying);
-#endif
     // Read vertex/face indices
     {
         VtIntArray vertsIndicesArray;
         bool ok = isTopologyVarying ? mesh.GetFaceVertexIndicesAttr().Get(&vertsIndicesArray, UsdTimeCode::EarliestTime()) : mesh.GetFaceVertexIndicesAttr().Get(&vertsIndicesArray);
         if (!ok)
         {
-            host.trace("[GeoData:%d]\tfailed getting face vertex indices on %s.", __LINE__, prim.GetPath().GetText());
+            pluginHosts->geoReaderHost.trace("[GeoData:%d]\tfailed getting face vertex indices on %s.", __LINE__, prim.GetPath().GetText());
             log.push_back("** Failed getting faces on " + std::string(prim.GetPath().GetText()));
             return;// this is not optional!
         }
-        m_vertexIndices = vector<int>(vertsIndicesArray.begin(), vertsIndicesArray.end());
+        m_vertexIndices = std::vector<int>(vertsIndicesArray.begin(), vertsIndicesArray.end());
     }
 
     // Read face counts
@@ -121,17 +120,17 @@ GeoData::GeoData(UsdPrim const &prim,
         bool ok = isTopologyVarying ? mesh.GetFaceVertexCountsAttr().Get(&nvertsPerFaceArray, UsdTimeCode::EarliestTime()) : mesh.GetFaceVertexCountsAttr().Get(&nvertsPerFaceArray);
         if (!ok)
         {
-            host.trace("[GeoData:%d]\tfailed getting face counts on %s", __LINE__, prim.GetPath().GetText());
+            pluginHosts->geoReaderHost.trace("[GeoData:%d]\tfailed getting face counts on %s", __LINE__, prim.GetPath().GetText());
             log.push_back("** Failed getting faces on " + std::string(prim.GetPath().GetText()));
             return;// this is not optional!
         }
-        m_faceCounts = vector<int>(nvertsPerFaceArray.begin(), nvertsPerFaceArray.end());
+        m_faceCounts = std::vector<int>(nvertsPerFaceArray.begin(), nvertsPerFaceArray.end());
     }
 
     // Create face selection indices
     {
         m_faceSelectionIndices.reserve(m_faceCounts.size());
-        for(int x = 0; x < m_faceCounts.size(); ++x)
+        for(auto x = 0u; x < m_faceCounts.size(); ++x)
         {
             m_faceSelectionIndices.push_back(x);
         }
@@ -160,7 +159,7 @@ GeoData::GeoData(UsdPrim const &prim,
             }
             if (faceIndices.size() != subsetIndicesArray.size())
             {
-                host.trace("[GeoData:%d]\tskipped invalid face indices in subset %s", __LINE__, subset.GetPath().GetText());
+                pluginHosts->geoReaderHost.trace("[GeoData:%d]\tskipped invalid face indices in subset %s", __LINE__, subset.GetPath().GetText());
                 log.push_back("** Skipped invalid face indices in subset " + subset.GetPath().GetString());
             }
 
@@ -207,7 +206,7 @@ GeoData::GeoData(UsdPrim const &prim,
                 SdfValueTypeName typeName      = uvPrimvar.GetTypeName();
                 TfToken          interpolation = uvPrimvar.GetInterpolation();
 
-                if ((interpolation == UsdGeomTokens->faceVarying or interpolation == UsdGeomTokens->vertex) and (typeName == SdfValueTypeNames->TexCoord2fArray or (GeoData::ReadFloat2AsUV() and typeName == SdfValueTypeNames->Float2Array)))
+                if ((interpolation == UsdGeomTokens->faceVarying || interpolation == UsdGeomTokens->vertex) && (typeName == SdfValueTypeNames->TexCoord2fArray || (GeoData::ReadFloat2AsUV() && typeName == SdfValueTypeNames->Float2Array)))
                 {
                     VtVec2fArray values;
                     VtIntArray indices;
@@ -215,7 +214,7 @@ GeoData::GeoData(UsdPrim const &prim,
                     {
                         // Read uvs
                         m_uvs.resize(values.size()*2);
-                        for (int i = 0; i < values.size(); ++i)
+                        for (auto i = 0u; i < values.size(); ++i)
                         {
                             m_uvs[i * 2    ] = values[i][0];
                             m_uvs[i * 2 + 1] = values[i][1];
@@ -228,7 +227,7 @@ GeoData::GeoData(UsdPrim const &prim,
                             if (interpolation == UsdGeomTokens->faceVarying)
                             {
                                 // All good -> primvar is indexed: validate/process values and indices together
-                                m_uvIndices = vector<int>(indices.begin(), indices.end());
+                                m_uvIndices = std::vector<int>(indices.begin(), indices.end());
                             }
                             else
                             {
@@ -240,9 +239,9 @@ GeoData::GeoData(UsdPrim const &prim,
                                 // 2. use VI as an index into the original vertex-interpolcated uv index table, to get uv index UVI
                                 // 3. add UVI to final face varying uv index array
                                 // VITAL NOTE: the final uv indices array count MUST MATCH the vertex indices array count
-                                std::vector<int> UvIndices = vector<int>(indices.begin(), indices.end());
+                                std::vector<int> UvIndices = std::vector<int>(indices.begin(), indices.end());
                                 int globalIndex = 0;
-                                for(int x = 0; x < m_faceCounts.size(); ++x)
+                                for(auto x = 0u; x < m_faceCounts.size(); ++x)
                                 {
                                     int vertCount = m_faceCounts[x];
                                     for (int vertIndex = 0; vertIndex < vertCount; ++vertIndex)
@@ -268,7 +267,7 @@ GeoData::GeoData(UsdPrim const &prim,
                     else
                     {
                         // Could not read uvs
-                        host.trace("[GeoData:%d]\tDiscarding mesh %s - specified uv set %s cannot be read", __LINE__, prim.GetPath().GetText(), uvSet.c_str());
+                        pluginHosts->geoReaderHost.trace("[GeoData:%d]\tDiscarding mesh %s - specified uv set %s cannot be read", __LINE__, prim.GetPath().GetText(), uvSet.c_str());
                         log.push_back("** Discarding mesh " + std::string(prim.GetPath().GetText()) + " - specified uv set " + uvSet + " cannot be read");
                         return;
                     }
@@ -276,7 +275,7 @@ GeoData::GeoData(UsdPrim const &prim,
                 else
                 {
                     // Incorrect interpolation
-                    host.trace("[GeoData:%d]\tDiscarding mesh %s - specified uv set %s is not of type 'faceVarying or vertex'", __LINE__, prim.GetPath().GetText(), uvSet.c_str());
+                    pluginHosts->geoReaderHost.trace("[GeoData:%d]\tDiscarding mesh %s - specified uv set %s is not of type 'faceVarying or vertex'", __LINE__, prim.GetPath().GetText(), uvSet.c_str());
                     log.push_back("** Discarding mesh " + std::string(prim.GetPath().GetText()) + " - specified uv set " + uvSet + " is not of type 'faceVarying or vertex'");
                     return;
                 }
@@ -284,7 +283,7 @@ GeoData::GeoData(UsdPrim const &prim,
             else
             {
                 // UV set not found on mesh
-                host.trace("[GeoData:%d]\tSpecified uv set %s not found on mesh %s - will use ptex", __LINE__, uvSet.c_str(), prim.GetPath().GetText());
+                pluginHosts->geoReaderHost.trace("[GeoData:%d]\tSpecified uv set %s not found on mesh %s - will use ptex", __LINE__, uvSet.c_str(), prim.GetPath().GetText());
                 log.push_back("** Discarding mesh " + std::string(prim.GetPath().GetText()) + " - specified uv set " + uvSet + " not found");
             }
         }
@@ -348,7 +347,7 @@ GeoData::GeoData(UsdPrim const &prim,
 
                     indices.reserve(numVertIndices);
 
-                    if (numNormals == maxVertexIndex+1)
+                    if (numNormals == static_cast<size_t>(maxVertexIndex)+1)
                     {
                         // In the case where there are as many normals as there are vertices
                         // we'll match up the normal indices to the vertex indices.
@@ -381,7 +380,7 @@ GeoData::GeoData(UsdPrim const &prim,
                 if (interpolation == UsdGeomTokens->faceVarying)
                 {
                     // For face varying, we can take the index list as-is.
-                    m_normalIndices = vector<int>(indices.begin(), indices.end());
+                    m_normalIndices = std::vector<int>(indices.begin(), indices.end());
                 }
                 else if (interpolation == UsdGeomTokens->vertex)
                 {
@@ -404,7 +403,7 @@ GeoData::GeoData(UsdPrim const &prim,
             else
             {
                 // UV set not found on mesh
-                host.trace("[GeoData:%d]\tVertex normals for mesh %s are not interpolated as 'vertex' or 'faceVarying', ignoring them.", __LINE__, prim.GetPath().GetText());
+                pluginHosts->geoReaderHost.trace("[GeoData:%d]\tVertex normals for mesh %s are not interpolated as 'vertex' or 'faceVarying', ignoring them.", __LINE__, prim.GetPath().GetText());
                 log.push_back("** Vertex normals for mesh " + std::string(prim.GetPath().GetText()) + " are not interpolated as 'vertex' or 'faceVarying', ignoring them.");
             }
         }
@@ -412,7 +411,7 @@ GeoData::GeoData(UsdPrim const &prim,
 
     // Load vertices and animation frames
     GfMatrix4d const IDENTITY(1);
-    vector<float> points;
+    std::vector<float> points;
     for (unsigned int iFrame = 0; iFrame < frames.size(); ++iFrame) 
     {
         // Get frame sample corresponding to frame index
@@ -423,13 +422,13 @@ GeoData::GeoData(UsdPrim const &prim,
         VtVec3fArray pointsVt;
         if (!mesh.GetPointsAttr().Get(&pointsVt, frameSample))
         {
-            host.trace("[GeoData:%d]\tfailed getting vertices on %s.", __LINE__, prim.GetPath().GetName().c_str());
+            pluginHosts->geoReaderHost.trace("[GeoData:%d]\tfailed getting vertices on %s.", __LINE__, prim.GetPath().GetName().c_str());
             log.push_back("** Failed getting faces on " + prim.GetPath().GetName());
             return;// this is not optional!
         }
         
         points.resize(pointsVt.size() * 3);
-        for(int i = 0; i < pointsVt.size(); ++i) 
+        for(auto i = 0u; i < pointsVt.size(); ++i) 
         {
             points[i * 3    ] = pointsVt[i][0];
             points[i * 3 + 1] = pointsVt[i][1];
@@ -438,36 +437,83 @@ GeoData::GeoData(UsdPrim const &prim,
 
         // Calculate transforms - if not identity, pre-transform all points in place
         UsdGeomXformCache xformCache(currentTime);
-        GfMatrix4d fullXform = xformCache.GetLocalToWorldTransform(prim);
+        GfMatrix4d fullXform(1.0);
 
         if (keepCentered)
         {
             // ignore transforms up to the model level
             GfMatrix4d m = xformCache.GetLocalToWorldTransform(model);
-            fullXform = fullXform * m.GetInverse();
+            fullXform = m.GetInverse();
         }
+        else
+        {
+            fullXform = xformCache.GetLocalToWorldTransform(prim);
+        }
+
         if (fullXform != IDENTITY)
         {
-            unsigned int psize = points.size();
-            for (unsigned int iPoint = 0; iPoint < psize; iPoint += 3)
+            auto psize = points.size();
+            for (auto iPoint = 0u; iPoint < psize; iPoint += 3)
             {
                 GfVec4d p(points[iPoint], points[iPoint + 1], points[iPoint + 2], 1.0);
                 p = p * fullXform;
-                points[iPoint    ] = p[0];
-                points[iPoint + 1] = p[1];
-                points[iPoint + 2] = p[2];
+                points[iPoint    ] = static_cast<float>(p[0]);
+                points[iPoint + 1] = static_cast<float>(p[1]);
+                points[iPoint + 2] = static_cast<float>(p[2]);
             }
+
+            // TODO: Do we need to rotate normals (and tangents/bitangents) as well?
         }
 
         if (conformToMariY && !readerIsUpY)
         {
             // Our source is Z and we need to conform to Y -> let's flip
-            unsigned int psize = points.size();
-            for (unsigned int iPoint = 0; iPoint < psize; iPoint += 3)
+            auto psize = points.size();
+            for (auto iPoint = 0u; iPoint < psize; iPoint += 3)
             {
                 float y = points[iPoint + 1];
                 points[iPoint + 1] = points[iPoint + 2];
                 points[iPoint + 2] = -y;
+            }
+
+            // TODO: Do we need to rotate normals (and tangents/bitangents) as well?
+        }
+
+        if (keepCentered)
+        {
+            GfVec3f minExtents(std::numeric_limits<float>::max());
+            GfVec3f maxExtents(std::numeric_limits<float>::min());
+
+            const auto psize = points.size();
+            for (auto iPoint = 0u; iPoint < psize; iPoint += 3)
+            {
+                const float px = points[iPoint];
+                const float py = points[iPoint+1];
+                const float pz = points[iPoint+2];
+                if (keepCentered)
+                {
+                    minExtents[0] = std::min(px, minExtents[0]);
+                    minExtents[1] = std::min(py, minExtents[1]);
+                    minExtents[2] = std::min(pz, minExtents[2]);
+
+                    maxExtents[0] = std::max(px, maxExtents[0]);
+                    maxExtents[1] = std::max(py, maxExtents[1]);
+                    maxExtents[2] = std::max(pz, maxExtents[2]);
+                }
+            }
+
+            const float offsetX = minExtents[0] + (maxExtents[0] - minExtents[0]) * 0.5f;
+            const float offsetY = minExtents[1] + (maxExtents[1] - minExtents[1]) * 0.5f;
+            const float offsetZ = minExtents[2] + (maxExtents[2] - minExtents[2]) * 0.5f;
+
+            if ((offsetX != 0.0f) || (offsetY != 0.0f) || (offsetZ != 0.0f))
+            {
+                for (unsigned int iPoint = 0; iPoint < psize; iPoint += 3)
+                {
+                    points[iPoint]   -= offsetX;
+                    points[iPoint+1] -= offsetY;
+                    points[iPoint+2] -= offsetZ;
+                }
             }
         }
 
@@ -476,105 +522,42 @@ GeoData::GeoData(UsdPrim const &prim,
         m_vertices[frameSample] = points;
     }
 
-    // DEBUG
-#if defined(PRINT_DEBUG)
-    {
-        host.trace("[GeoData:%d]\t\t Face counts %i", __LINE__, m_faceCounts.size());
-    #if defined(PRINT_ARRAYS)
-        for (unsigned int x = 0; x < m_faceCounts.size(); ++x)
-        {
-            host.trace("\t\t face count[%d] : %d", x, m_faceCounts[x]);
-        }
-    #endif
-
-        host.trace("[GeoData:%d]\t\t vertex indices %i", __LINE__, m_vertexIndices.size());
-    #if defined(PRINT_ARRAYS)
-        for (unsigned x = 0; x < m_vertexIndices.size(); ++x)
-        {
-            host.trace("\t\t vertex Index[%d] : %d", x, m_vertexIndices[x]);
-        }
-    #endif
-
-        host.trace("[GeoData:%d]\t\t vertex frame count %i", __LINE__, m_vertices.size());
-        vector<float> vertices0 = m_vertices.begin()->second;
-        host.trace("[GeoData:%d]\t\t vertex @ frame0 count %i", __LINE__, vertices0.size()/3);
-    #if defined(PRINT_ARRAYS)
-        for (unsigned x = 0; x < vertices0.size()/3; ++x)
-        {
-            host.trace("\t\t vertex[%d] : (%f, %f, %f)", x, vertices0[(x*3)+0], vertices0[(x*3)+1], vertices0[(x*3)+2]);
-        }
-    #endif
-
-        host.trace("[GeoData:%d]\t\t uvs count %i", __LINE__, m_uvs.size()/2);
-    #if defined(PRINT_ARRAYS)
-        for(int x = 0; x < m_uvs.size()/2; ++x)
-        {
-            host.trace("\t\t uv[%d] : (%f, %f)", x, m_uvs[(x*2)+0], m_uvs[(x*2)+1]);
-        }
-    #endif
-
-        host.trace("[GeoData:%d]\t\t uv indices %i", __LINE__, m_uvIndices.size());
-    #if defined(PRINT_ARRAYS)
-        for(int x = 0; x < m_uvIndices.size(); ++x)
-        {
-            host.trace("\t\t UV Index[%d] : %d", x, m_uvIndices[x]);
-        }
-    #endif
-
-        host.trace("[GeoData:%d]\t\t normals count %i", __LINE__, m_normals.size()/3);
-    #if defined(PRINT_ARRAYS)
-        for(int x = 0; x < m_normals.size()/3; ++x)
-        {
-            host.trace("\t\t normal[%d] : (%f, %f, %f)", x, m_normals[(x*3)+0], m_normals[(x*3)+1], m_normals[(x*3)+2]);
-        }
-    #endif
-
-        host.trace("[GeoData:%d]\t\t normals indices %i", __LINE__, m_normalIndices.size());
-    #if defined(PRINT_ARRAYS)
-        for(int x = 0; x < m_normalIndices.size(); ++x)
-        {
-            host.trace("\t\t Normal Index[%d] : %d", x, m_normalIndices[x]);
-        }
-    #endif
-    }
-#endif
-
     // Read OpenSubdiv structures
     {
         VtIntArray creaseIndicesArray;
         if (mesh.GetCreaseIndicesAttr().Get(&creaseIndicesArray))
         {
-            m_creaseIndices = vector<int>(creaseIndicesArray.begin(), creaseIndicesArray.end());
+            m_creaseIndices = std::vector<int>(creaseIndicesArray.begin(), creaseIndicesArray.end());
         }
 
         VtIntArray creaseLengthsArray;
         if (mesh.GetCreaseLengthsAttr().Get(&creaseLengthsArray))
         {
-            m_creaseLengths = vector<int>(creaseLengthsArray.begin(), creaseLengthsArray.end());
+            m_creaseLengths = std::vector<int>(creaseLengthsArray.begin(), creaseLengthsArray.end());
         }
 
         VtFloatArray creaseSharpnessArray;
         if (mesh.GetCreaseSharpnessesAttr().Get(&creaseSharpnessArray))
         {
-            m_creaseSharpness = vector<float>(creaseSharpnessArray.begin(), creaseSharpnessArray.end());
+            m_creaseSharpness = std::vector<float>(creaseSharpnessArray.begin(), creaseSharpnessArray.end());
         }
 
         VtIntArray cornerIndicesArray;
         if (mesh.GetCornerIndicesAttr().Get(&cornerIndicesArray))
         {
-            m_cornerIndices = vector<int>(cornerIndicesArray.begin(), cornerIndicesArray.end());
+            m_cornerIndices = std::vector<int>(cornerIndicesArray.begin(), cornerIndicesArray.end());
         }
 
         VtFloatArray cornerSharpnessArray;
         if (mesh.GetCornerSharpnessesAttr().Get(&cornerSharpnessArray))
         {
-            m_cornerSharpness = vector<float>(cornerSharpnessArray.begin(), cornerSharpnessArray.end());
+            m_cornerSharpness = std::vector<float>(cornerSharpnessArray.begin(), cornerSharpnessArray.end());
         }
 
         VtIntArray holeIndicesArray;
         if (mesh.GetHoleIndicesAttr().Get(&holeIndicesArray))
         {
-            m_holeIndices = vector<int>(holeIndicesArray.begin(), holeIndicesArray.end());
+            m_holeIndices = std::vector<int>(holeIndicesArray.begin(), holeIndicesArray.end());
         }
 
         m_isSubdivMesh = false;
@@ -677,7 +660,7 @@ GeoData::~GeoData()
 
 
 // Print the internal status of the Geometric Data.
-void GeoData::Log(const MriGeoReaderHost& host)
+void GeoData::Log(const PluginHosts* /*pluginHosts*/)
 {
 }
 
@@ -690,24 +673,115 @@ GeoData::operator bool()
 // Static - Sanity test to see if the usd prim is something we can use.
 bool GeoData::IsValidNode(UsdPrim const &prim)
 {
-    if (not prim.IsA<UsdGeomMesh>())
+    if (!prim.IsA<UsdGeomMesh>())
         return false;
     else
         return TestPath( prim.GetPath().GetText());
 }
 
-
-
-// Pre-scan the UsdStage to see what uv sets are included.
-void GeoData::GetUvSets(UsdPrim const &prim, UVSet &retval)
+void GeoData::SetRightHandedWindingOrder(bool rightHandedWindingOrder)
 {
-    UsdGeomGprim   gprim(prim);
-    if (not gprim)
+    m_isRightHandWindingOrder = rightHandedWindingOrder;
+}
+
+//------------------------------------------------------------------------------
+/// Helper function to check if an asset path references an Alembic file
+static bool IsAlembicAssetPath(const std::string& AssetPath)
+{
+    if (AssetPath.length() < 4)
+    {
+        return false;
+    }
+
+    std::string Extension = AssetPath.substr(AssetPath.length() - 4);
+    // Case-insensitive comparison for .abc extension
+    std::transform(Extension.begin(), Extension.end(), Extension.begin(), ::tolower);
+    return Extension == ".abc";
+}
+
+//------------------------------------------------------------------------------
+/// Helper function to detect if a prim or its ancestors reference an Alembic file
+static bool HasAlembicPayload(UsdPrim const &Prim)
+{
+    // Check the prim and walk up the hierarchy to find any Alembic payloads/references
+    UsdPrim CurrentPrim = Prim;
+
+    while (CurrentPrim)
+    {
+        // Check for payloads using composition query
+        if (CurrentPrim.HasPayload())
+        {
+            // Try all list op types
+            SdfPayloadListOp PayloadListOp;
+            if (CurrentPrim.GetMetadata(SdfFieldKeys->Payload, &PayloadListOp))
+            {
+                std::vector<SdfPayloadVector> AllPayloads = {
+                    PayloadListOp.GetExplicitItems(),
+                    PayloadListOp.GetAddedItems(),
+                    PayloadListOp.GetPrependedItems(),
+                    PayloadListOp.GetAppendedItems()
+                };
+
+                for (const auto& PayloadList : AllPayloads)
+                {
+                    for (const auto& Payload : PayloadList)
+                    {
+                        if (IsAlembicAssetPath(Payload.GetAssetPath()))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for references
+        if (CurrentPrim.HasAuthoredReferences())
+        {
+            SdfReferenceListOp ReferenceListOp;
+            if (CurrentPrim.GetMetadata(SdfFieldKeys->References, &ReferenceListOp))
+            {
+                std::vector<SdfReferenceVector> AllReferences = {
+                    ReferenceListOp.GetExplicitItems(),
+                    ReferenceListOp.GetAddedItems(),
+                    ReferenceListOp.GetPrependedItems(),
+                    ReferenceListOp.GetAppendedItems()
+                };
+
+                for (const auto& ReferenceList : AllReferences)
+                {
+                    for (const auto& Reference : ReferenceList)
+                    {
+                        if (IsAlembicAssetPath(Reference.GetAssetPath()))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Move up to parent
+        CurrentPrim = CurrentPrim.GetParent();
+    }
+
+    return false;
+}
+
+//------------------------------------------------------------------------------
+// Pre-scan the UsdStage to see what uv sets are included.
+void GeoData::GetUvSets(UsdPrim const &Prim, UVSet &retval)
+{
+    UsdGeomGprim   gprim(Prim);
+    if (!gprim)
         return;
+
+    // Check if this prim or any ancestor references an Alembic file
+    bool IsAlembicPayload = HasAlembicPayload(Prim);
 
     UsdGeomPrimvarsAPI gPrimApi(gprim);
 
-    vector<UsdGeomPrimvar> primvars = gPrimApi.GetPrimvars();
+    std::vector<UsdGeomPrimvar> primvars = gPrimApi.GetPrimvars();
     TF_FOR_ALL(primvar, primvars) 
     {
         TfToken          name, interpolation;
@@ -717,13 +791,13 @@ void GeoData::GetUvSets(UsdPrim const &prim, UVSet &retval)
         primvar->GetDeclarationInfo(&name, &typeName, 
                                      &interpolation, &elementSize);
         
-        if (interpolation == UsdGeomTokens->vertex or
-             interpolation == UsdGeomTokens->faceVarying)
+        if (interpolation == UsdGeomTokens->vertex || 
+            interpolation == UsdGeomTokens->faceVarying)
         {
-            string prefix = name.GetString().substr(0,2);
-            string mapName("");
+            std::string prefix = name.GetString().substr(0,2);
+            std::string mapName("");
         
-            if ((prefix == "v_" || prefix == "u_") and
+            if ((prefix == "v_" || prefix == "u_") && 
                 (typeName == SdfValueTypeNames->FloatArray))
             {
                 mapName = name.GetString().substr(2);
@@ -734,6 +808,14 @@ void GeoData::GetUvSets(UsdPrim const &prim, UVSet &retval)
                 mapName = name.GetString();
             }
             if (mapName.length()) {
+                // For Alembic payloads, only include the "st" UV set to avoid redundancy.
+                // The usdAbc plugin creates both "st" (USD standard) and the original
+                // Alembic UV set names, which reference the same data.
+                if (IsAlembicPayload && mapName != "st")
+                {
+                    continue;
+                }
+
                 UVSet::iterator it = retval.find(mapName);
                 if (it == retval.end())
                     retval[mapName] = 1;
@@ -786,13 +868,13 @@ void GeoData::Reset()
     m_holeIndices.clear();
 }
 
-bool GeoData::TestPath(string path)
+bool GeoData::TestPath(std::string path)
 {
     bool requiredSubstringFound = true;
     std::vector<std::string>::iterator i;
     for (i=_requireGeomPathSubstring.begin(); i!=_requireGeomPathSubstring.end(); ++i)
     {
-        if (path.find(*i) != string::npos)
+        if (path.find(*i) != std::string::npos)
         {
             requiredSubstringFound = true;
             break;
@@ -808,7 +890,7 @@ bool GeoData::TestPath(string path)
 
     for (i=_ignoreGeomPathSubstring.begin(); i!=_ignoreGeomPathSubstring.end(); ++i)
     {
-        if (path.find(*i) != string::npos)
+        if (path.find(*i) != std::string::npos)
         {
             return false;
         }

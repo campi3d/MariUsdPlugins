@@ -20,14 +20,25 @@
 # KIND, either express or implied. See the Apache License for the specific
 # language governing permissions and limitations under the Apache License.
 
-import mari
+"""USD Preview Surface shader writer for the Mari USD export pipeline.
+
+Provides :func:`writeUsdPreviewSurface`, which serialises a Mari shader
+network as the equivalent ``UsdPreviewSurface`` shading graph, and
+registers the writer with the USD export framework on import.
+"""
+
 import os
 import re
+
+from fnpxr import Sdf, UsdShade
+
+import mari
+
 from . import usdShadeExport
-from pxr import Sdf, UsdShade
+
 
 def writeUsdPreviewSurface(looks_stage, usd_shader, usd_export_parameters, usd_shader_source):
-    """Function to write out the Usd shading nodes for an input to a UsdPreviewSurface shader.
+    """Write the USD shading nodes for the inputs of a ``UsdPreviewSurface`` shader.
 
     Args:
         looks_stage (Usd.Stage): Stage to write to
@@ -53,12 +64,14 @@ def writeUsdPreviewSurface(looks_stage, usd_shader, usd_export_parameters, usd_s
         "Vector": (None, None),
         "Displacement": ("displacement", Sdf.ValueTypeNames.Float),
     }
-    usdShadeExport._debuglog("Writing USD Preview Surface shader network for %s" % usd_shader_source.sourceShader().name())
+    usdShadeExport._debuglog(
+        "Writing USD Preview Surface shader network for %s" % usd_shader_source.sourceShader().name()
+    )
     material_sdf_path = usd_shader.GetPath().GetParentPath()
 
     shader_model = usd_shader_source.shaderModel()
     source_shader = usd_shader_source.sourceShader()
-    node_prefix = source_shader.name().replace(" ","_")
+    node_prefix = source_shader.name().replace(" ", "_")
     export_items = []
     for shader_input_name in shader_model.inputNames():
         usd_shader_input_name, sdf_type = mari_to_usd_input_map[shader_input_name]
@@ -72,7 +85,7 @@ def writeUsdPreviewSurface(looks_stage, usd_shader, usd_export_parameters, usd_s
             st_reader = UsdShade.Shader.Get(looks_stage, st_reader_path)
             if st_reader.GetPath().isEmpty:
                 st_reader = UsdShade.Shader.Define(looks_stage, st_reader_path)
-                st_reader.CreateIdAttr('UsdPrimvarReader_float2')
+                st_reader.CreateIdAttr("UsdPrimvarReader_float2")
                 st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set(usd_shader_source.uvSetName())
 
             # TODO: Implement a override option for export that gets passed into this function
@@ -83,7 +96,9 @@ def writeUsdPreviewSurface(looks_stage, usd_shader, usd_export_parameters, usd_s
             # Create and connect the texture reading shading node
             texture_usd_file_name = re.sub(r"\$UDIM", "<UDIM>", export_item.resolveFileTemplate())
             texture_usd_file_path = os.path.join(usd_export_parameters.exportRootPath(), texture_usd_file_name)
-            texture_sampler_sdf_path = material_sdf_path.AppendChild("{0}_{1}Texture".format(node_prefix,shader_input_name))
+            texture_sampler_sdf_path = material_sdf_path.AppendChild(
+                "{0}_{1}Texture".format(node_prefix, shader_input_name)
+            )
             texture_sampler = UsdShade.Shader.Define(looks_stage, texture_sampler_sdf_path)
             texture_sampler.CreateIdAttr("UsdUVTexture")
             texture_sampler.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(
@@ -116,7 +131,13 @@ def writeUsdPreviewSurface(looks_stage, usd_shader, usd_export_parameters, usd_s
                 usd_export_parameters.exportRootPath()
             )
         )
-        mari.exports.exportTextures(export_items, usd_export_parameters.exportRootPath(), usd_export_parameters.exportOverrides(), ShowProgressDialog = True)
+        mari.exports.exportTextures(
+            export_items,
+            usd_export_parameters.exportRootPath(),
+            usd_export_parameters.exportOverrides(),
+            ShowProgressDialog=True
+        )
+
 
 if mari.app.isRunning():
     usdShadeExport.registerRendererExportPlugin(

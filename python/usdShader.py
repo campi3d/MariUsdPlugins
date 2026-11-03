@@ -20,15 +20,32 @@
 # KIND, either express or implied. See the Apache License for the specific
 # language governing permissions and limitations under the Apache License.
 
-import mari
+"""Register the USD Preview Surface custom shader with Mari.
+
+Loaded at startup to register the GLSL shader code and XML shader
+description for the ``USD Preview Surface`` standalone shader exposed by
+this plugin.
+"""
+
 import os
+import pathlib
+
+import mari
+
 
 if mari.app.isRunning():
-    usd_path = mari.resources.bundledUsdPath()
+    usd_path = pathlib.Path(mari.resources.bundledUsdPath())
+    node_path = usd_path / "nodes"
+    shader_path = usd_path / "shaders"
 
-    shader_path = os.path.join(usd_path, "shaders")
-    mari.gl_render.registerCustomHeaderFile("mriUsdPreviewSurfaceFuncsHeader", os.path.join(shader_path, "mriUsdPreviewSurfaceFuncs.glslh"))
-    mari.gl_render.registerCustomCodeFile("mriUsdPreviewSurfaceFuncsBody", os.path.join(shader_path, "mriUsdPreviewSurfaceFuncs.glslc"))
-    
-    node_path = os.path.join(usd_path, "nodes")
-    mari.gl_render.registerCustomStandaloneShaderFromXMLFile("USD Preview Surface", os.path.join(node_path, "mriUsdPreviewSurface.xml"))
+    mari.gl_render.registerCustomHeaderFile(
+        "mriUsdPreviewSurfaceFuncsHeader",
+        os.fspath(shader_path / "mriUsdPreviewSurfaceFuncs.glslh"))
+
+    mari.gl_render.registerCustomCodeFile(
+        "mriUsdPreviewSurfaceFuncsBody",
+        os.fspath(shader_path / "mriUsdPreviewSurfaceFuncs.glslc"))
+
+    mari.gl_render.registerCustomStandaloneShaderFromXMLFile(
+        "USD Preview Surface",
+        os.fspath(node_path / "mriUsdPreviewSurface.xml"))

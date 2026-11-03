@@ -29,6 +29,7 @@
 //
 
 #include "MriGeoReaderPlugin.h"
+#include "MriCameraReaderPlugin.h"
 
 #include <assert.h>
 #include <math.h>
@@ -37,18 +38,13 @@
 #include <stdlib.h>
 #include <string>
 
+#include "Defines.h"
 #include "MariHostConfig.h"
 
 /// Returns the list of plug-ins in this library
-extern "C"
-#ifdef _WIN32
-__declspec(dllexport)
-#else
-__attribute__((visibility("default")))
-#endif
-FnPlugin *getPlugins(unsigned int *pNumPlugins);
+extern "C" USD_PLUGIN_EXPORT_SYMBOL FnPlugin *getPlugins(unsigned int *pNumPlugins);
 
-
+// Geo Reader plugin functions
 /// Loads a geometry file
 MriGeoPluginResult load(MriGeoEntityHandle Entity, 
         const char *pFileName, 
@@ -59,7 +55,6 @@ MriGeoPluginResult getSettings(MriUserItemHandle SettingsHandle,
 /// Returns the formats supported by the plug-in
 MriFileFormatDesc *supportedFormats(int *pNumFormatsOut);
 
-
 /// Sets the host information for a plug-in
 FnPluginStatus setHost(const FnPluginHost *pHost);
 /// Returns the suite of functions provided by a plug-in
@@ -67,14 +62,24 @@ const void *getPluginSuite();
 /// Cleans up the plug-in
 void flushPluginSuite();
 
-///< The host structure, which contains functions that the plug-in can call
-MriGeoReaderHost host;
+// Camera Reader plugin functions
+/// Loads a camera file
+MriCameraPluginResult loadCamera(MriCameraHandle CameraHandle,
+        const char *pFileName,
+        const char **ppMessagesOut);
+/// Returns the formats supported by the camera plug-in
+MriFileFormatDesc *supportedFormatsCamera(int *pNumFormatsOut);
+/// Returns the frame range of a camera file
+MriCameraPluginResult frameRangeCamera(const char *pFileName,
+        const char *pTake,
+        int *pStartFrameOut,
+        int *pEndFrameOut,
+        const char **ppMessagesOut);
 
-/// The plug-in structure, to provide to the host so it can call functions 
-/// when needed
-MriGeoReaderPluginV1 pluginSuite =
-{
-    &load,
-    &getSettings,
-    &supportedFormats
-};
+/// Sets the host information for camera plug-in
+FnPluginStatus setCameraHost(const FnPluginHost *pHost);
+/// Returns the camera suite of functions
+const void *getCameraPluginSuite();
+/// Cleans up the camera plug-in
+void flushCameraPluginSuite();
+
